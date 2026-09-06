@@ -3,6 +3,7 @@ package massim.javaagents.agents;
 import eis.iilang.*;
 import massim.javaagents.MailService;
 
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -12,7 +13,29 @@ import java.util.Set;
  */
 public class BasicAgent extends Agent {
 
+    private enum Desire {
+        EXPLORE,
+        REACH_GOAL_ZONE,
+        WAIT
+    }
+
+    private record Intention(Desire desire, List<String> plan, int nextAction) {
+        private Intention advance() {
+            return new Intention(desire, plan, nextAction + 1);
+        }
+
+        private boolean finished() {
+            return nextAction >= plan.size();
+        }
+    }
+
     private int lastID = -1;
+    private int currentStep = -1;
+    private int energy = -1;
+    private boolean deactivated;
+    private String currentTask;
+    private Intention currentIntention;
+    private String pendingDirection;
 
     private final InternalMap internalMap = new InternalMap();
 
@@ -33,7 +56,6 @@ public class BasicAgent extends Agent {
 
     public Action move(String direction) {
         if (direction.equals("n") || direction.equals("s") || direction.equals("e") || direction.equals("w")) {
-            System.out.println("hi");
             return new Action("move", new Identifier(direction));
 
         } else {
@@ -134,31 +156,126 @@ public class BasicAgent extends Agent {
         }
     }
 
-    @Override
-    public Action step() {
-        List<Percept> percepts = getPercepts();
-        System.out.println(internalMap.getAgentY());
-        updateAgentPosition(percepts);
-        updateInternalMap(percepts);
-        System.out.println(getName() + " at position (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");
-        System.out.println(internalMap.getObservations());
+    private void updateBeliefs(List<Percept> percepts) {
         for (Percept percept : percepts) {
-            if (percept.getName().equals("actionID")) {
-                Parameter param = percept.getParameters().get(0);
-                if (param instanceof Numeral) {
-                    int id = ((Numeral) param).getValue().intValue();
-                    if (id > lastID) {
-                        lastID = id;
-                            try {
-                                Thread.sleep(2000);
-                                } catch (InterruptedException e) {
-                                    Thread.currentThread().interrupt();
-                                }
-                        return move("n"); 
-                    }
+            if (percept.getParameters().isEmpty()) {
+                continue;
+            }
+
+            switch (percept.getName()) {
+                case "step" -> currentStep = numberValue(percept, currentStep);
+                case "energy" -> energy = numberValue(percept, energy);
+                case "deactivated" -> deactivated = identifierValue(percept, "false").equals("true");
+                case "task" -> currentTask = identifierValue(percept, currentTask);
+                default -> {
+                    // This percept does not update a scalar belief.
                 }
             }
         }
-        return null;
+    }
+
+    private int numberValue(Percept percept, int fallback) {
+        Parameter parameter = percept.getParameters().get(0);
+        return parameter instanceof Numeral numeral ? numeral.getValue().intValue() : fallback;
+    }
+
+    private String identifierValue(Percept percept, String fallback) {
+        Parameter parameter = percept.getParameters().get(0);
+        return parameter instanceof Identifier identifier ? identifier.getValue() : fallback;
+    }
+
+    private boolean isNewActionCycle(List<Percept> percepts) {
+        for (Percept percept : percepts) {
+            if (percept.getName().equals("actionID") && !percept.getParameters().isEmpty()
+                    && percept.getParameters().get(0) instanceof Numeral numeral) {
+                int actionID = numeral.getValue().intValue();
+                if (actionID > lastID) {
+                    lastID = actionID;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void updateIntentionAfterAction(List<Percept> percepts) {
+        if (pendingDirection == null || currentIntention == null) {
+            return;
+        }
+
+        String lastAction = null;
+        String lastActionResult = null;
+        for (Percept percept : percepts) {
+            if (percept.getName().equals("lastAction") && !percept.getParameters().isEmpty()) {
+                lastAction = identifierValue(percept, null);
+            } else if (percept.getName().equals("lastActionResult")
+                    && !percept.getParameters().isEmpty()) {
+                lastActionResult = identifierValue(percept, null);
+            }
+        }
+
+        if ("move".equals(lastAction) && "success".equals(lastActionResult)) {
+            currentIntention = currentIntention.advance();
+        }
+        pendingDirection = null;
+    }
+
+    private Set<Desire> generateDesires() {
+        Set<Desire> desires = EnumSet.noneOf(Desire.class);
+        if (deactivated) {
+            desires.add(Desire.WAIT);
+        } else if (hasObservation("goalZone")) {
+            desires.add(Desire.REACH_GOAL_ZONE);
+        } else {
+            desires.add(Desire.EXPLORE);
+        }
+        return desires;
+    }
+
+    private boolean hasObservation(String type) {
+        return internalMap.getObservations().stream()
+                .anyMatch(observation -> observation.type().equals(type));
+    }
+
+    private Intention selectIntention(Set<Desire> desires) {
+        if (desires.contains(Desire.WAIT)) {
+            return new Intention(Desire.WAIT, List.of(), 0);
+        }
+
+        if (desires.contains(Desire.REACH_GOAL_ZONE)) {
+            return new Intention(Desire.REACH_GOAL_ZONE, List.of("n"), 0);
+        }
+
+        return new Intention(Desire.EXPLORE, List.of("n", "e", "s", "w"), 0);
+    }
+
+    private Action executeIntention() {
+        if (currentIntention == null || currentIntention.finished()
+                || currentIntention.desire() == Desire.WAIT) {
+            return null;
+        }
+
+        pendingDirection = currentIntention.plan().get(currentIntention.nextAction());
+        return move(pendingDirection);
+    }
+
+    @Override
+    public Action step() {
+        List<Percept> percepts = getPercepts();
+
+        if (!isNewActionCycle(percepts)) {
+            return null;
+        }
+
+        updateAgentPosition(percepts);
+        updateInternalMap(percepts);
+        updateBeliefs(percepts);
+        updateIntentionAfterAction(percepts);
+
+        if (currentIntention == null || currentIntention.finished()) {
+            currentIntention = selectIntention(generateDesires());
+        }
+
+        return executeIntention();
     }
 }
