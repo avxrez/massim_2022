@@ -2,8 +2,10 @@ package massim.javaagents.agents;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class InternalMap {
 
@@ -20,6 +22,7 @@ public class InternalMap {
 	 * nicht mehrere alte Informationen behalten.
 	 */
 	private final Map<ObservationKey, Observation> observations = new HashMap<>();
+	private final Set<Position> occupiedEntityPositions = new HashSet<>();
 
 
 	// -------------------------------------------------------------------------
@@ -94,6 +97,14 @@ public class InternalMap {
         rememberObservation("free", relativeX, relativeY, "", step);
 	}
 
+	public void clearOccupiedEntityPositions() {
+		occupiedEntityPositions.clear();
+	}
+
+	public void rememberOccupiedEntity(int relativeX, int relativeY) {
+		occupiedEntityPositions.add(new Position(agentX + relativeX, agentY + relativeY));
+	}
+
 
 	// -------------------------------------------------------------------------
 	// Query map
@@ -117,8 +128,13 @@ public class InternalMap {
 	 *     werden konnte
 	 */
 	public List<Position> getBlockedPositions() {
-		return observations.values().stream().filter(observation -> observation.type().equals("obstacle")
-        ||observation.type().equals("failedPath")).map(observation ->new Position(observation.x(),observation.y())).distinct().toList();
+		Set<Position> blockedPositions = new HashSet<>(occupiedEntityPositions);
+		observations.values().stream()
+				.filter(observation -> observation.type().equals("obstacle")
+						|| observation.type().equals("failedPath"))
+				.map(observation -> new Position(observation.x(), observation.y()))
+				.forEach(blockedPositions::add);
+		return List.copyOf(blockedPositions);
 	}
 
 	/**

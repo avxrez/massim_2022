@@ -59,7 +59,7 @@ public class AStarPathPlanner {
             return reconstructPath(parents, start, goal);
         }
 
-        return List.of();
+        return findPathIgnoringObstacles(start, goal);
     }
 
     private List<InternalMap.Position> neighbors(InternalMap.Position position) {
@@ -103,4 +103,93 @@ public class AStarPathPlanner {
         if (to.y() > from.y()) return "s";
         return "n";
     }
+
+
+
+    private List<String> findPathIgnoringObstacles(
+            InternalMap.Position start,
+            InternalMap.Position goal) {
+
+        PriorityQueue<Node> open = new PriorityQueue<>(Comparator
+                .comparingInt(Node::estimate)
+                .thenComparingInt(Node::cost));
+
+        Map<InternalMap.Position, Integer> costs = new HashMap<>();
+        Map<InternalMap.Position, InternalMap.Position> parents = new HashMap<>();
+
+        costs.put(start, 0);
+        open.add(new Node(
+                start,
+                0,
+                heuristic(start, goal)
+        ));
+
+        // Etwas größer als bisher, damit der Agent
+        // auch um Hindernisse herum planen kann.
+        int margin = 10;
+
+        int minX = Math.min(start.x(), goal.x()) - margin;
+        int maxX = Math.max(start.x(), goal.x()) + margin;
+        int minY = Math.min(start.y(), goal.y()) - margin;
+        int maxY = Math.max(start.y(), goal.y()) + margin;
+
+        while (!open.isEmpty()) {
+
+            Node current = open.poll();
+
+            if (current.position().equals(goal)) {
+                return reconstructPath(
+                        parents,
+                        start,
+                        goal
+                );
+            }
+
+            for (InternalMap.Position neighbor :
+                    neighbors(current.position())) {
+
+                if (!insideBounds(
+                        neighbor,
+                        minX,
+                        maxX,
+                        minY,
+                        maxY)) {
+                    continue;
+                }
+
+                // WICHTIG:
+                // Hier wird absichtlich NICHT geprüft,
+                // ob neighbor ein Hindernis ist.
+
+                int newCost = current.cost() + 1;
+
+                if (newCost <
+                        costs.getOrDefault(
+                                neighbor,
+                                Integer.MAX_VALUE)) {
+
+                    costs.put(neighbor, newCost);
+
+                    parents.put(
+                            neighbor,
+                            current.position()
+                    );
+
+                    open.add(new Node(
+                            neighbor,
+                            newCost,
+                            newCost + heuristic(
+                                    neighbor,
+                                    goal
+                            )
+                    ));
+                }
+            }
+        }
+
+        return List.of();
+    }
+
+
 }
+

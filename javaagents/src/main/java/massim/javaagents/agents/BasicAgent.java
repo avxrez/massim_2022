@@ -63,7 +63,7 @@ public class BasicAgent extends Agent {
 	// ============================================================
 	// CURRENT INTENTION
 	// ============================================================
-
+    private InternalMap.Position explorationTarget;
 	private Intention currentIntention;
 	private String pendingAction;
 	private String pendingDirection;
@@ -74,6 +74,9 @@ public class BasicAgent extends Agent {
 	// ============================================================
 
 	private final AStarPathPlanner pathPlanner = new AStarPathPlanner();
+
+    private final ExplorationTargetSelector explorationTargetSelector =
+        new ExplorationTargetSelector();
 
 	// ============================================================
 	// CONSTRUCTOR
@@ -204,6 +207,8 @@ public class BasicAgent extends Agent {
 			return;
 		}
 
+		internalMap.clearOccupiedEntityPositions();
+
 		// --------------------------------------------------------
 		// Read visible objects
 		// --------------------------------------------------------
@@ -231,6 +236,11 @@ public class BasicAgent extends Agent {
 				if (!thingType.equals("entity")) {
 
 					internalMap.rememberObservation(thingType, x, y, details, step);
+
+				} else {
+
+					internalMap.rememberFreeCell(x, y, step);
+					internalMap.rememberOccupiedEntity(x, y);
 				}
 
 			} else if ((type.equals("goalZone") || type.equals("roleZone")) && percept.getParameters().size() >= 2) {
@@ -517,9 +527,7 @@ public class BasicAgent extends Agent {
 	 * This method decides HOW the desired behaviour
 	 * should currently be achieved.
 	 */
-	private Intention selectIntention(
-			Set<Desire> desires
-			) {
+	private Intention selectIntention(Set<Desire> desires) {
 
 		if (desires.contains(Desire.WAIT)) {
 
@@ -565,16 +573,52 @@ public class BasicAgent extends Agent {
 	 * Exploration target selection will be implemented
 	 * separately.
 	 */
-	private Intention createExploreIntention() {
+    private Intention createExploreIntention() {
 
-		return new Intention(Desire.EXPLORE, List.of(), 0);
-	}
+        InternalMap.Position start = currentPosition();
+
+        InternalMap.Position target = explorationTargetSelector.selectTarget(internalMap);
+
+        explorationTarget = target;
+        System.out.println("Exploration target: " + explorationTarget);
+
+        List<String> path = pathPlanner.findPath(start,target,internalMap.getBlockedPositions());
+
+        if(nextMoveIsBlocked(path)) {
+            return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
+        }
+
+
+        return new Intention(Desire.EXPLORE,path,0);
+    }
 
 	private InternalMap.Position currentPosition() {
 
 		return new InternalMap.Position(internalMap.getAgentX(), internalMap.getAgentY());
 
 	}
+
+    private boolean nextMoveIsBlocked(List<String> plan) {
+
+        if (plan == null || plan.isEmpty()) {
+            return false;
+        }
+
+        String direction = plan.get(0);
+
+        int[] offset = directionOffset(direction);
+
+        int nextX = internalMap.getAgentX() + offset[0];
+        int nextY = internalMap.getAgentY() + offset[1];
+
+        InternalMap.Position nextPosition =
+                new InternalMap.Position(nextX, nextY);
+
+        return internalMap.getBlockedPositions()
+                .contains(nextPosition);
+    }
+
+
 
 	private InternalMap.Observation findNearestGoalZone() {
 
@@ -619,6 +663,8 @@ public class BasicAgent extends Agent {
 	 */
 	private Action executeIntention() {
 
+        System.out.println("Current Intention: " + currentIntention);
+
 		if (currentIntention == null) {
 			return skip();
 		}
@@ -653,13 +699,14 @@ public class BasicAgent extends Agent {
 
 	private Action executeClear() {
 
-		if (clearDirection == null) {
+		if (currentIntention.plan().isEmpty()) {
 
 			return skip();
 		}
 
 		pendingAction = "clear";
 
+		clearDirection = currentIntention.plan().get(0);
 		int[] offset = directionOffset(clearDirection);
 
 		return new Action("clear", new Numeral(offset[0]), new Numeral(offset[1]));
@@ -711,6 +758,9 @@ public class BasicAgent extends Agent {
 		if (!isNewActionCycle(percepts)) {
 			return null;
 		}
+
+        //System.out.println(internalMap.getObservations());
+        System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy);
 
 
 		// --------------------------------------------------------
