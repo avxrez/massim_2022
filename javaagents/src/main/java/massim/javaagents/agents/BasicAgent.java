@@ -4,6 +4,7 @@ import eis.iilang.*;
 import massim.javaagents.MailService;
 
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -60,7 +61,7 @@ public class BasicAgent extends Agent {
 	private String currentTask;
 	private String teamName = "";
 	private final Set<String> requiredDispenserTypes = new HashSet<>();
-    private final Set<String> knownAgents = new HashSet<>();
+	private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
 	private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
 	private final InternalMap internalMap = new InternalMap();
 
@@ -109,32 +110,61 @@ public class BasicAgent extends Agent {
 	@Override
 	public void handleMessage(Percept message, String sender) {
 		if (message.getName().equals("teammateRequest")
-				&& message.getParameters().size() >= 2
+				&& message.getParameters().size() >= 4
 				&& message.getParameters().get(0) instanceof Numeral x
-				&& message.getParameters().get(1) instanceof Numeral y) {
+				&& message.getParameters().get(1) instanceof Numeral y
+				&& message.getParameters().get(2) instanceof Numeral senderX
+				&& message.getParameters().get(3) instanceof Numeral senderY) {
 
 			int requestX = x.getValue().intValue();
 			int requestY = y.getValue().intValue();
 
-			if (isVisibleTeammateAt(-requestX, -requestY)) {
-				knownAgents.add(sender);
+			if (isVisibleTeammateAt(-requestX, -requestY)
+					&& !knownAgents.containsKey(sender)) {
+
+				if (nameNumber(getName()) > nameNumber(sender)) {
+					int offsetX = senderX.getValue().intValue() + requestX - internalMap.getAgentX();
+					int offsetY = senderY.getValue().intValue() + requestY - internalMap.getAgentY();
+					internalMap.translate(offsetX, offsetY);
+				}
+
+				knownAgents.put(sender,
+						new InternalMap.Position(
+								internalMap.getAgentX() - requestX,
+								internalMap.getAgentY() - requestY));
 				sendMessage(new Percept("teammateReply",
 						new Identifier(getName()),
 						new Numeral(-requestX),
-						new Numeral(-requestY)), sender, getName());
+						new Numeral(-requestY),
+						new Numeral(internalMap.getAgentX()),
+						new Numeral(internalMap.getAgentY())), sender, getName());
 			}
 			return;
 		}
 
 		if (message.getName().equals("teammateReply")
-				&& message.getParameters().size() >= 3
+				&& message.getParameters().size() >= 5
 				&& message.getParameters().get(0) instanceof Identifier identifier
 				&& message.getParameters().get(1) instanceof Numeral x
 				&& message.getParameters().get(2) instanceof Numeral y
+				&& message.getParameters().get(3) instanceof Numeral senderX
+				&& message.getParameters().get(4) instanceof Numeral senderY
 				&& sender.equals(identifier.getValue())
-				&& isVisibleTeammateAt(-x.getValue().intValue(), -y.getValue().intValue())) {
+				&& isVisibleTeammateAt(-x.getValue().intValue(), -y.getValue().intValue())
+				&& !knownAgents.containsKey(sender)) {
 
-			knownAgents.add(sender);
+			if (nameNumber(getName()) > nameNumber(sender)) {
+				int offsetX = senderX.getValue().intValue() + x.getValue().intValue()
+						- internalMap.getAgentX();
+				int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
+						- internalMap.getAgentY();
+				internalMap.translate(offsetX, offsetY);
+			}
+
+			knownAgents.put(sender,
+					new InternalMap.Position(
+							internalMap.getAgentX() - x.getValue().intValue(),
+							internalMap.getAgentY() - y.getValue().intValue()));
 		}
 	}
 
@@ -355,12 +385,21 @@ public class BasicAgent extends Agent {
 		return visibleTeammates.contains(new InternalMap.Position(x, y));
 	}
 
+	private int nameNumber(String name) {
+		String number = name.replaceAll("[^0-9]", "");
+		return number.isEmpty() ? -1 : Integer.parseInt(number);
+	}
+
 	private void exchangeTeammateNames() {
-		for (InternalMap.Position teammate : visibleTeammates) {
-			broadcast(new Percept("teammateRequest",
-					new Numeral(teammate.x()),
-					new Numeral(teammate.y())), getName());
-		}
+	    for (InternalMap.Position teammate : visibleTeammates) {
+	        broadcast(new Percept(
+	                "teammateRequest",
+	                new Numeral(teammate.x()),
+	                new Numeral(teammate.y()),
+	                new Numeral(internalMap.getAgentX()),
+	                new Numeral(internalMap.getAgentY())
+	        ), getName());
+	    }
 	}
 
 	/**
@@ -813,7 +852,10 @@ public class BasicAgent extends Agent {
 		}
 
         System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy);
-        System.out.println(internalMap.getObservations());
+        System.out.println("Dispensers:");
+internalMap.getObservations().stream()
+        .filter(observation -> observation.type().equals("dispenser"))
+        .forEach(System.out::println);
         System.out.println("Known agents: " + knownAgents);
 
 

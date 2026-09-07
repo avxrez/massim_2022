@@ -180,4 +180,64 @@ public class InternalMap {
 	private void removeObservationsAt(int x, int y) {
 		observations.keySet().removeIf( key -> key.x() == x && key.y() == y);
 	}
+
+	/**
+ * Verschiebt die gesamte interne Karte um einen Offset.
+ *
+ * Alle bekannten Koordinaten und auch die eigene
+ * Agentenposition werden entsprechend verschoben.
+ */
+	public void translate(int offsetX, int offsetY) {
+	
+	    // Agentenposition verschieben
+	    agentX += offsetX;
+	    agentY += offsetY;
+	
+	    // Beobachtungen verschieben
+	    Map<ObservationKey, Observation> translatedObservations = new HashMap<>();
+	
+	    for (Observation observation : observations.values()) {
+		
+	        int newX = observation.x() + offsetX;
+	        int newY = observation.y() + offsetY;
+		
+	        Observation translated = new Observation(
+	                observation.type(),
+	                newX,
+	                newY,
+	                observation.details(),
+	                observation.lastSeenStep()
+	        );
+		
+	        ObservationKey key = new ObservationKey(
+	                translated.type(),
+	                newX,
+	                newY,
+	                translated.details()
+	        );
+		
+	        translatedObservations.put(key, translated);
+	    }
+	
+	    observations.clear();
+	    observations.putAll(translatedObservations);
+	
+	    // Besetzte Entity-Positionen ebenfalls verschieben
+	    Set<Position> translatedEntities = new HashSet<>();
+	
+	    for (Position position : occupiedEntityPositions) {
+		
+	        translatedEntities.add(
+	                new Position(
+	                        position.x() + offsetX,
+	                        position.y() + offsetY
+	                )
+	        );
+	    }
+	
+	    occupiedEntityPositions.clear();
+	    occupiedEntityPositions.addAll(translatedEntities);
+	}
 }
+
+

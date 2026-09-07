@@ -4,8 +4,8 @@
     "steps" : 350,
     "randomSeed" : 17,
     "randomFail" : 1,
-    "entities" : {"standard" : 2},
-    "clusterBounds" : [1,3],
+    "entities" : {"standard" : 4},
+    "clusterBounds" : [3,3],
 
     "roles" : "$(roles/standard.json)",
 
@@ -46,7 +46,7 @@
     },
 
     "events" : {
-      "chance" : 15,
+      "chance" : 0,
       "radius" : [3, 5],
       "warning" : 5,
       "create" : [-3, 1],
