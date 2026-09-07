@@ -6,6 +6,7 @@ import massim.javaagents.MailService;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -57,7 +58,10 @@ public class BasicAgent extends Agent {
 	private int energy = -1;
 	private boolean deactivated;
 	private String currentTask;
+	private String teamName = "";
 	private final Set<String> requiredDispenserTypes = new HashSet<>();
+    private final Set<String> knownAgents = new HashSet<>();
+	private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
 	private final InternalMap internalMap = new InternalMap();
 
 	// ============================================================
@@ -104,7 +108,34 @@ public class BasicAgent extends Agent {
 
 	@Override
 	public void handleMessage(Percept message, String sender) {
-		// Not used yet.
+		if (message.getName().equals("teammateRequest")
+				&& message.getParameters().size() >= 2
+				&& message.getParameters().get(0) instanceof Numeral x
+				&& message.getParameters().get(1) instanceof Numeral y) {
+
+			int requestX = x.getValue().intValue();
+			int requestY = y.getValue().intValue();
+
+			if (isVisibleTeammateAt(-requestX, -requestY)) {
+				knownAgents.add(sender);
+				sendMessage(new Percept("teammateReply",
+						new Identifier(getName()),
+						new Numeral(-requestX),
+						new Numeral(-requestY)), sender, getName());
+			}
+			return;
+		}
+
+		if (message.getName().equals("teammateReply")
+				&& message.getParameters().size() >= 3
+				&& message.getParameters().get(0) instanceof Identifier identifier
+				&& message.getParameters().get(1) instanceof Numeral x
+				&& message.getParameters().get(2) instanceof Numeral y
+				&& sender.equals(identifier.getValue())
+				&& isVisibleTeammateAt(-x.getValue().intValue(), -y.getValue().intValue())) {
+
+			knownAgents.add(sender);
+		}
 	}
 
 	/**
@@ -208,6 +239,7 @@ public class BasicAgent extends Agent {
 		}
 
 		internalMap.clearOccupiedEntityPositions();
+		visibleTeammates.clear();
 
 		// --------------------------------------------------------
 		// Read visible objects
@@ -241,6 +273,12 @@ public class BasicAgent extends Agent {
 
 					internalMap.rememberFreeCell(x, y, step);
 					internalMap.rememberOccupiedEntity(x, y);
+
+					if (!teamName.isEmpty()
+							&& !(x == 0 && y == 0)
+							&& teamName.equals(details)) {
+						visibleTeammates.add(new InternalMap.Position(x, y));
+					}
 				}
 
 			} else if ((type.equals("goalZone") || type.equals("roleZone")) && percept.getParameters().size() >= 2) {
@@ -294,6 +332,9 @@ public class BasicAgent extends Agent {
 			case "energy" ->
 			energy = numberValue(percept, energy);
 
+			case "team" ->
+			teamName = identifierValue(percept, teamName);
+
 			case "deactivated" ->
 			deactivated = identifierValue(percept, "false").equals("true");
 
@@ -307,6 +348,18 @@ public class BasicAgent extends Agent {
 			}
 			}
 
+		}
+	}
+
+	private boolean isVisibleTeammateAt(int x, int y) {
+		return visibleTeammates.contains(new InternalMap.Position(x, y));
+	}
+
+	private void exchangeTeammateNames() {
+		for (InternalMap.Position teammate : visibleTeammates) {
+			broadcast(new Percept("teammateRequest",
+					new Numeral(teammate.x()),
+					new Numeral(teammate.y())), getName());
 		}
 	}
 
@@ -759,8 +812,9 @@ public class BasicAgent extends Agent {
 			return null;
 		}
 
-        //System.out.println(internalMap.getObservations());
         System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy);
+        System.out.println(internalMap.getObservations());
+        System.out.println("Known agents: " + knownAgents);
 
 
 		// --------------------------------------------------------
@@ -769,9 +823,10 @@ public class BasicAgent extends Agent {
 
 		updateAgentPosition(percepts);
 
-		updateInternalMap(percepts);
-
 		updateBeliefs(percepts);
+
+		updateInternalMap(percepts);
+		exchangeTeammateNames();
 
 
 		// --------------------------------------------------------
