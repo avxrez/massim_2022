@@ -118,6 +118,23 @@ public class InternalMap {
 	}
 
 	/**
+	 * Fügt Beobachtungen einer bereits bekannten Karte mit einem Koordinaten-
+	 * Offset in diese Karte ein.
+	 */
+	public void mergeObservations(List<Observation> observationsToMerge, int offsetX, int offsetY) {
+		for (Observation observation : observationsToMerge) {
+			int mergedX = observation.x() + offsetX;
+			int mergedY = observation.y() + offsetY;
+			removeObservationsAt(mergedX, mergedY);
+
+			String details = observation.details() == null ? "" : observation.details();
+			ObservationKey key = new ObservationKey(observation.type(), mergedX, mergedY, details);
+			observations.put(key, new Observation(
+					observation.type(), mergedX, mergedY, details, observation.lastSeenStep()));
+		}
+	}
+
+	/**
 	 * Gibt alle Positionen zurück, die aktuell als blockiert gelten.
 	 *
 	 * obstacle:

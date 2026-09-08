@@ -109,8 +109,20 @@ public class BasicAgent extends Agent {
 
 	@Override
 	public void handleMessage(Percept message, String sender) {
+		if (message.getName().equals("mapUpdate")
+				&& message.getParameters().size() >= 3
+				&& message.getParameters().get(0) instanceof Numeral senderX
+				&& message.getParameters().get(1) instanceof Numeral senderY) {
+
+			mergeMap(message.getParameters().get(2), 0, 0);
+			knownAgents.put(sender,
+					new InternalMap.Position(
+							senderX.getValue().intValue(), senderY.getValue().intValue()));
+			return;
+		}
+
 		if (message.getName().equals("teammateRequest")
-				&& message.getParameters().size() >= 4
+				&& message.getParameters().size() >= 5
 				&& message.getParameters().get(0) instanceof Numeral x
 				&& message.getParameters().get(1) instanceof Numeral y
 				&& message.getParameters().get(2) instanceof Numeral senderX
@@ -126,6 +138,11 @@ public class BasicAgent extends Agent {
 					int offsetX = senderX.getValue().intValue() + requestX - internalMap.getAgentX();
 					int offsetY = senderY.getValue().intValue() + requestY - internalMap.getAgentY();
 					internalMap.translate(offsetX, offsetY);
+					mergeMap(message.getParameters().get(4), 0, 0);
+				} else {
+					int offsetX = internalMap.getAgentX() - requestX - senderX.getValue().intValue();
+					int offsetY = internalMap.getAgentY() - requestY - senderY.getValue().intValue();
+					mergeMap(message.getParameters().get(4), offsetX, offsetY);
 				}
 
 				knownAgents.put(sender,
@@ -137,13 +154,14 @@ public class BasicAgent extends Agent {
 						new Numeral(-requestX),
 						new Numeral(-requestY),
 						new Numeral(internalMap.getAgentX()),
-						new Numeral(internalMap.getAgentY())), sender, getName());
+						new Numeral(internalMap.getAgentY()),
+						mapParameters()), sender, getName());
 			}
 			return;
 		}
 
 		if (message.getName().equals("teammateReply")
-				&& message.getParameters().size() >= 5
+				&& message.getParameters().size() >= 6
 				&& message.getParameters().get(0) instanceof Identifier identifier
 				&& message.getParameters().get(1) instanceof Numeral x
 				&& message.getParameters().get(2) instanceof Numeral y
@@ -160,12 +178,49 @@ public class BasicAgent extends Agent {
 						- internalMap.getAgentY();
 				internalMap.translate(offsetX, offsetY);
 			}
+			mergeMap(message.getParameters().get(5), 0, 0);
 
 			knownAgents.put(sender,
 					new InternalMap.Position(
 							internalMap.getAgentX() - x.getValue().intValue(),
 							internalMap.getAgentY() - y.getValue().intValue()));
 		}
+	}
+
+	private ParameterList mapParameters() {
+		ParameterList map = new ParameterList();
+		for (InternalMap.Observation observation : internalMap.getObservations()) {
+			map.add(new Function("observation",
+					new Identifier(observation.type()),
+					new Numeral(observation.x()),
+					new Numeral(observation.y()),
+					new Identifier(observation.details()),
+					new Numeral(observation.lastSeenStep())));
+		}
+		return map;
+	}
+
+	private void mergeMap(Parameter parameter, int offsetX, int offsetY) {
+		if (!(parameter instanceof ParameterList map)) {
+			return;
+		}
+
+		List<InternalMap.Observation> observations = new java.util.ArrayList<>();
+		for (Parameter entry : map) {
+			if (entry instanceof Function observation
+					&& observation.getName().equals("observation")
+					&& observation.getParameters().size() >= 5
+					&& observation.getParameters().get(0) instanceof Identifier type
+					&& observation.getParameters().get(1) instanceof Numeral x
+					&& observation.getParameters().get(2) instanceof Numeral y
+					&& observation.getParameters().get(3) instanceof Identifier details
+					&& observation.getParameters().get(4) instanceof Numeral step) {
+				observations.add(new InternalMap.Observation(
+						type.getValue(), x.getValue().intValue(), y.getValue().intValue(),
+						details.getValue(), step.getValue().intValue()));
+			}
+		}
+		internalMap.mergeObservations(observations, offsetX, offsetY);
 	}
 
 	/**
@@ -397,9 +452,20 @@ public class BasicAgent extends Agent {
 	                new Numeral(teammate.x()),
 	                new Numeral(teammate.y()),
 	                new Numeral(internalMap.getAgentX()),
-	                new Numeral(internalMap.getAgentY())
+	                new Numeral(internalMap.getAgentY()),
+	                mapParameters()
 	        ), getName());
 	    }
+	}
+
+	private void exchangeMapUpdates() {
+		for (String agent : knownAgents.keySet()) {
+			sendMessage(new Percept(
+					"mapUpdate",
+					new Numeral(internalMap.getAgentX()),
+					new Numeral(internalMap.getAgentY()),
+					mapParameters()), agent, getName());
+		}
 	}
 
 	/**
@@ -655,6 +721,10 @@ public class BasicAgent extends Agent {
 
 		List<String> path = pathPlanner.findPath(start, target, internalMap.getBlockedPositions());
 
+		if (nextMoveIsBlocked(path)) {
+			return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
+		}
+
 		return new Intention(Desire.REACH_GOAL_ZONE, path, 0);
 	}
 
@@ -869,6 +939,7 @@ internalMap.getObservations().stream()
 
 		updateInternalMap(percepts);
 		exchangeTeammateNames();
+		exchangeMapUpdates();
 
 
 		// --------------------------------------------------------
