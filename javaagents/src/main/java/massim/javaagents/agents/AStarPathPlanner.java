@@ -20,7 +20,6 @@ public class AStarPathPlanner {
                                  List<InternalMap.Position> blockedPositions) {
         Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
         blocked.remove(start);
-        blocked.remove(goal);
 
         PriorityQueue<Node> open = new PriorityQueue<>(Comparator
                 .comparingInt(Node::estimate)
@@ -31,7 +30,7 @@ public class AStarPathPlanner {
         costs.put(start, 0);
         open.add(new Node(start, 0, heuristic(start, goal)));
 
-        int margin = blocked.size() + 1;
+        int margin = Math.min(blocked.size() + 1, 10);
         int minX = Math.min(start.x(), goal.x()) - margin;
         int maxX = Math.max(start.x(), goal.x()) + margin;
         int minY = Math.min(start.y(), goal.y()) - margin;

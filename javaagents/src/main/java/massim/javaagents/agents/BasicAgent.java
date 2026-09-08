@@ -3,6 +3,7 @@ package massim.javaagents.agents;
 import eis.iilang.*;
 import massim.javaagents.MailService;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -62,8 +63,14 @@ public class BasicAgent extends Agent {
 	private String teamName = "";
 	private final Set<String> requiredDispenserTypes = new HashSet<>();
 	private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
+	private final Map<String, InternalMap.Position> knownTargets = new HashMap<>();
 	private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
+	private final List<PendingTeammateRequest> pendingTeammateRequests = new ArrayList<>();
 	private final InternalMap internalMap = new InternalMap();
+
+	private record PendingTeammateRequest(String sender, int x, int y, int senderX, int senderY,
+			Parameter map) {
+	}
 
 	// ============================================================
 	// CURRENT INTENTION
@@ -110,14 +117,23 @@ public class BasicAgent extends Agent {
 	@Override
 	public void handleMessage(Percept message, String sender) {
 		if (message.getName().equals("mapUpdate")
-				&& message.getParameters().size() >= 3
+				&& message.getParameters().size() >= 5
 				&& message.getParameters().get(0) instanceof Numeral senderX
-				&& message.getParameters().get(1) instanceof Numeral senderY) {
+				&& message.getParameters().get(1) instanceof Numeral senderY
+				&& message.getParameters().get(2) instanceof Numeral targetX
+				&& message.getParameters().get(3) instanceof Numeral targetY) {
 
-			mergeMap(message.getParameters().get(2), 0, 0);
+			mergeMap(message.getParameters().get(4), 0, 0);
 			knownAgents.put(sender,
 					new InternalMap.Position(
 							senderX.getValue().intValue(), senderY.getValue().intValue()));
+			if (targetX.getValue().intValue() == Integer.MIN_VALUE) {
+				knownTargets.remove(sender);
+			} else {
+				knownTargets.put(sender,
+						new InternalMap.Position(
+								targetX.getValue().intValue(), targetY.getValue().intValue()));
+			}
 			return;
 		}
 
@@ -128,34 +144,11 @@ public class BasicAgent extends Agent {
 				&& message.getParameters().get(2) instanceof Numeral senderX
 				&& message.getParameters().get(3) instanceof Numeral senderY) {
 
-			int requestX = x.getValue().intValue();
-			int requestY = y.getValue().intValue();
-
-			if (isVisibleTeammateAt(-requestX, -requestY)
-					&& !knownAgents.containsKey(sender)) {
-
-				if (nameNumber(getName()) > nameNumber(sender)) {
-					int offsetX = senderX.getValue().intValue() + requestX - internalMap.getAgentX();
-					int offsetY = senderY.getValue().intValue() + requestY - internalMap.getAgentY();
-					internalMap.translate(offsetX, offsetY);
-					mergeMap(message.getParameters().get(4), 0, 0);
-				} else {
-					int offsetX = internalMap.getAgentX() - requestX - senderX.getValue().intValue();
-					int offsetY = internalMap.getAgentY() - requestY - senderY.getValue().intValue();
-					mergeMap(message.getParameters().get(4), offsetX, offsetY);
-				}
-
-				knownAgents.put(sender,
-						new InternalMap.Position(
-								internalMap.getAgentX() - requestX,
-								internalMap.getAgentY() - requestY));
-				sendMessage(new Percept("teammateReply",
-						new Identifier(getName()),
-						new Numeral(-requestX),
-						new Numeral(-requestY),
-						new Numeral(internalMap.getAgentX()),
-						new Numeral(internalMap.getAgentY()),
-						mapParameters()), sender, getName());
+			synchronized (pendingTeammateRequests) {
+			pendingTeammateRequests.add(new PendingTeammateRequest(sender,
+					x.getValue().intValue(), y.getValue().intValue(),
+					senderX.getValue().intValue(), senderY.getValue().intValue(),
+					message.getParameters().get(4)));
 			}
 			return;
 		}
@@ -187,6 +180,47 @@ public class BasicAgent extends Agent {
 		}
 	}
 
+	private void processTeammateRequests() {
+		List<PendingTeammateRequest> requests;
+		synchronized (pendingTeammateRequests) {
+			requests = new ArrayList<>(pendingTeammateRequests);
+			pendingTeammateRequests.clear();
+		}
+
+		List<PendingTeammateRequest> matchingRequests = requests.stream()
+				.filter(request -> isVisibleTeammateAt(-request.x(), -request.y()))
+				.filter(request -> !knownAgents.containsKey(request.sender()))
+				.toList();
+
+		if (matchingRequests.size() != 1) {
+			return;
+		}
+
+		PendingTeammateRequest request = matchingRequests.get(0);
+		if (nameNumber(getName()) > nameNumber(request.sender())) {
+			int offsetX = request.senderX() + request.x() - internalMap.getAgentX();
+			int offsetY = request.senderY() + request.y() - internalMap.getAgentY();
+			internalMap.translate(offsetX, offsetY);
+			mergeMap(request.map(), 0, 0);
+		} else {
+			int offsetX = internalMap.getAgentX() - request.x() - request.senderX();
+			int offsetY = internalMap.getAgentY() - request.y() - request.senderY();
+			mergeMap(request.map(), offsetX, offsetY);
+		}
+
+		knownAgents.put(request.sender(),
+				new InternalMap.Position(
+						internalMap.getAgentX() - request.x(),
+						internalMap.getAgentY() - request.y()));
+		sendMessage(new Percept("teammateReply",
+				new Identifier(getName()),
+				new Numeral(-request.x()),
+				new Numeral(-request.y()),
+				new Numeral(internalMap.getAgentX()),
+				new Numeral(internalMap.getAgentY()),
+				mapParameters()), request.sender(), getName());
+	}
+
 	private ParameterList mapParameters() {
 		ParameterList map = new ParameterList();
 		for (InternalMap.Observation observation : internalMap.getObservations()) {
@@ -197,7 +231,18 @@ public class BasicAgent extends Agent {
 					new Identifier(observation.details()),
 					new Numeral(observation.lastSeenStep())));
 		}
+		addKnownAgentParameters(map);
 		return map;
+	}
+
+	private void addKnownAgentParameters(ParameterList map) {
+		for (Map.Entry<String, InternalMap.Position> entry : knownAgents.entrySet()) {
+			InternalMap.Position position = entry.getValue();
+			map.add(new Function("agent",
+					new Identifier(entry.getKey()),
+					new Numeral(position.x()),
+					new Numeral(position.y())));
+		}
 	}
 
 	private void mergeMap(Parameter parameter, int offsetX, int offsetY) {
@@ -218,9 +263,63 @@ public class BasicAgent extends Agent {
 				observations.add(new InternalMap.Observation(
 						type.getValue(), x.getValue().intValue(), y.getValue().intValue(),
 						details.getValue(), step.getValue().intValue()));
+			} else if (entry instanceof Function agent
+					&& agent.getName().equals("agent")
+					&& agent.getParameters().size() >= 3
+					&& agent.getParameters().get(0) instanceof Identifier name
+					&& agent.getParameters().get(1) instanceof Numeral x
+					&& agent.getParameters().get(2) instanceof Numeral y) {
+				knownAgents.put(name.getValue(),
+						new InternalMap.Position(
+								x.getValue().intValue() + offsetX,
+								y.getValue().intValue() + offsetY));
 			}
 		}
 		internalMap.mergeObservations(observations, offsetX, offsetY);
+	}
+
+	private ParameterList currentMapPercepts(List<Percept> percepts) {
+		ParameterList map = new ParameterList();
+		int step = currentStep;
+
+		for (Percept percept : percepts) {
+			if (percept.getName().equals("thing")
+					&& percept.getParameters().size() >= 3
+					&& percept.getParameters().get(0) instanceof Numeral x
+					&& percept.getParameters().get(1) instanceof Numeral y
+					&& percept.getParameters().get(2) instanceof Identifier type) {
+
+				if (type.getValue().equals("entity")) {
+					continue;
+				}
+
+				String details = "";
+				if (percept.getParameters().size() > 3
+						&& percept.getParameters().get(3) instanceof Identifier identifier) {
+					details = identifier.getValue();
+				}
+
+				map.add(new Function("observation",
+						new Identifier(type.getValue()),
+						new Numeral(internalMap.getAgentX() + x.getValue().intValue()),
+						new Numeral(internalMap.getAgentY() + y.getValue().intValue()),
+						new Identifier(details),
+						new Numeral(step)));
+			} else if ((percept.getName().equals("goalZone")
+					|| percept.getName().equals("roleZone"))
+					&& percept.getParameters().size() >= 2
+					&& percept.getParameters().get(0) instanceof Numeral x
+					&& percept.getParameters().get(1) instanceof Numeral y) {
+
+				map.add(new Function("observation",
+						new Identifier(percept.getName()),
+						new Numeral(internalMap.getAgentX() + x.getValue().intValue()),
+						new Numeral(internalMap.getAgentY() + y.getValue().intValue()),
+						new Identifier(""),
+						new Numeral(step)));
+			}
+		}
+		return map;
 	}
 
 	/**
@@ -447,6 +546,10 @@ public class BasicAgent extends Agent {
 
 	private void exchangeTeammateNames() {
 	    for (InternalMap.Position teammate : visibleTeammates) {
+			if (isKnownTeammateAt(teammate)) {
+				continue;
+			}
+
 	        broadcast(new Percept(
 	                "teammateRequest",
 	                new Numeral(teammate.x()),
@@ -458,13 +561,25 @@ public class BasicAgent extends Agent {
 	    }
 	}
 
-	private void exchangeMapUpdates() {
+	private boolean isKnownTeammateAt(InternalMap.Position relativePosition) {
+		InternalMap.Position absolutePosition = new InternalMap.Position(
+				internalMap.getAgentX() + relativePosition.x(),
+				internalMap.getAgentY() + relativePosition.y());
+		return knownAgents.containsValue(absolutePosition);
+	}
+
+	private void exchangeMapUpdates(List<Percept> percepts) {
+		ParameterList currentPercepts = currentMapPercepts(percepts);
+		addKnownAgentParameters(currentPercepts);
 		for (String agent : knownAgents.keySet()) {
+			InternalMap.Position target = explorationTarget;
 			sendMessage(new Percept(
 					"mapUpdate",
 					new Numeral(internalMap.getAgentX()),
 					new Numeral(internalMap.getAgentY()),
-					mapParameters()), agent, getName());
+					new Numeral(target == null ? Integer.MIN_VALUE : target.x()),
+					new Numeral(target == null ? Integer.MIN_VALUE : target.y()),
+					currentPercepts), agent, getName());
 		}
 	}
 
@@ -739,7 +854,8 @@ public class BasicAgent extends Agent {
 
         InternalMap.Position start = currentPosition();
 
-        InternalMap.Position target = explorationTargetSelector.selectTarget(internalMap);
+		InternalMap.Position target = explorationTargetSelector.selectTarget(
+			internalMap, knownTargets, getName());
 
         explorationTarget = target;
         System.out.println("Exploration target: " + explorationTarget);
@@ -758,6 +874,12 @@ public class BasicAgent extends Agent {
 
 		return new InternalMap.Position(internalMap.getAgentX(), internalMap.getAgentY());
 
+	}
+
+	private boolean explorationTargetSeen() {
+		return explorationTarget != null
+				&& internalMap.isKnownPosition(
+						explorationTarget.x(), explorationTarget.y());
 	}
 
     private boolean nextMoveIsBlocked(List<String> plan) {
@@ -921,12 +1043,10 @@ public class BasicAgent extends Agent {
 			return null;
 		}
 
-        System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy);
-        System.out.println("Dispensers:");
-internalMap.getObservations().stream()
-        .filter(observation -> observation.type().equals("dispenser"))
-        .forEach(System.out::println);
-        System.out.println("Known agents: " + knownAgents);
+        System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy + ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");
+		System.out.println("currentIntention: " + currentIntention);
+		//System.out.println("Current target: " + explorationTarget);
+		//System.out.println(percepts);
 
 
 		// --------------------------------------------------------
@@ -938,8 +1058,8 @@ internalMap.getObservations().stream()
 		updateBeliefs(percepts);
 
 		updateInternalMap(percepts);
+		processTeammateRequests();
 		exchangeTeammateNames();
-		exchangeMapUpdates();
 
 
 		// --------------------------------------------------------
@@ -947,6 +1067,13 @@ internalMap.getObservations().stream()
 		// --------------------------------------------------------
 
 		updateIntentionAfterAction(percepts);
+
+		if (currentIntention != null
+				&& currentIntention.desire() == Desire.EXPLORE
+				&& explorationTargetSeen()) {
+			currentIntention = null;
+			explorationTarget = null;
+		}
 
 
 		// --------------------------------------------------------
@@ -962,6 +1089,17 @@ internalMap.getObservations().stream()
 			currentIntention =
 					selectIntention(desires);
 		}
+
+		if (currentIntention != null
+				&& currentIntention.desire() == Desire.EXPLORE
+				&& explorationTarget != null
+				&& !explorationTargetSelector.isTargetAllowed(
+						explorationTarget, knownTargets, getName())) {
+			explorationTarget = null;
+			currentIntention = selectIntention(EnumSet.of(Desire.EXPLORE));
+		}
+
+		exchangeMapUpdates(percepts);
 
 
 		// --------------------------------------------------------

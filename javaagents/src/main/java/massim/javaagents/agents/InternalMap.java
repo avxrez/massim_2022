@@ -83,7 +83,7 @@ public class InternalMap {
 		int absoluteY = agentY + relativeY;
 
 		String observationDetails =details == null ? "" : details;
-        removeObservationsAt(absoluteX, absoluteY);
+        removeObservationsForUpdate(absoluteX, absoluteY, type);
 
 		ObservationKey key = new ObservationKey(type, absoluteX, absoluteY, observationDetails);
 
@@ -125,7 +125,7 @@ public class InternalMap {
 		for (Observation observation : observationsToMerge) {
 			int mergedX = observation.x() + offsetX;
 			int mergedY = observation.y() + offsetY;
-			removeObservationsAt(mergedX, mergedY);
+			removeObservationsForUpdate(mergedX, mergedY, observation.type());
 
 			String details = observation.details() == null ? "" : observation.details();
 			ObservationKey key = new ObservationKey(observation.type(), mergedX, mergedY, details);
@@ -170,7 +170,7 @@ public class InternalMap {
 	 * Merkt sich eine Position, die nicht betreten werden konnte.
 	 */
 	public void rememberFailedPath(int x, int y, int step) {
-		removeObservationsAt(x, y);
+		removeBlockedObservationsAt(x, y);
         ObservationKey key =new ObservationKey("failedPath",x,y,"");
 		observations.put(key, new Observation("failedPath",x,y,"",step));
 	}
@@ -187,7 +187,7 @@ public class InternalMap {
 	 * Wird beispielsweise nach erfolgreichem Clear verwendet.
 	 */
 	public void forgetObservationsAt(int x, int y) {
-		removeObservationsAt(x, y);
+		removeBlockedObservationsAt(x, y);
 		rememberFreeCell(x - agentX, y - agentY, 0 );
 	}
 
@@ -196,6 +196,30 @@ public class InternalMap {
 	 */
 	private void removeObservationsAt(int x, int y) {
 		observations.keySet().removeIf( key -> key.x() == x && key.y() == y);
+	}
+
+	private void removeBlockedObservationsAt(int x, int y) {
+		observations.keySet().removeIf(key ->
+				key.x() == x && key.y() == y && isBlocked(key.type()));
+	}
+
+	private void removeObservationsForUpdate(int x, int y, String newType) {
+		observations.keySet().removeIf(key ->
+				key.x() == x
+						&& key.y() == y
+						&& !mustKeepTogether(key.type(), newType));
+	}
+
+	private boolean mustKeepTogether(String firstType, String secondType) {
+		return isZone(firstType) || isZone(secondType);
+	}
+
+	private boolean isZone(String type) {
+		return type.equals("goalZone") || type.equals("roleZone");
+	}
+
+	private boolean isBlocked(String type) {
+		return type.equals("obstacle") || type.equals("failedPath");
 	}
 
 	/**
