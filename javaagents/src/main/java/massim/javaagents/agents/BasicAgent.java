@@ -54,7 +54,8 @@ public class BasicAgent extends Agent {
 	// ============================================================
 	// BELIEFS
 	// ============================================================
-
+	
+	private String leaderName = "";
 	private int lastID = -1;
 	private int currentStep = -1;
 	private int energy = -1;
@@ -68,8 +69,8 @@ public class BasicAgent extends Agent {
 	private final List<PendingTeammateRequest> pendingTeammateRequests = new ArrayList<>();
 	private final InternalMap internalMap = new InternalMap();
 
-	private record PendingTeammateRequest(String sender, int x, int y, int senderX, int senderY,
-			Parameter map) {
+	private record PendingTeammateRequest(String sender, String senderLeaderName, int x, int y,
+			int senderX, int senderY, Parameter map) {
 	}
 
 	// ============================================================
@@ -103,6 +104,7 @@ public class BasicAgent extends Agent {
 	 */
 	public BasicAgent(String name, MailService mailbox) {
 		super(name, mailbox);
+		leaderName = name;
 	}
 
 	// ============================================================
@@ -117,11 +119,13 @@ public class BasicAgent extends Agent {
 	@Override
 	public void handleMessage(Percept message, String sender) {
 		if (message.getName().equals("mapUpdate")
-				&& message.getParameters().size() >= 5
+				&& message.getParameters().size() >= 6
 				&& message.getParameters().get(0) instanceof Numeral senderX
 				&& message.getParameters().get(1) instanceof Numeral senderY
 				&& message.getParameters().get(2) instanceof Numeral targetX
-				&& message.getParameters().get(3) instanceof Numeral targetY) {
+				&& message.getParameters().get(3) instanceof Numeral targetY
+				&& message.getParameters().get(5) instanceof Identifier senderLeaderName
+				&& leaderName.equals(senderLeaderName.getValue())) {
 
 			mergeMap(message.getParameters().get(4), 0, 0);
 			knownAgents.put(sender,
@@ -138,33 +142,35 @@ public class BasicAgent extends Agent {
 		}
 
 		if (message.getName().equals("teammateRequest")
-				&& message.getParameters().size() >= 5
+				&& message.getParameters().size() >= 6
 				&& message.getParameters().get(0) instanceof Numeral x
 				&& message.getParameters().get(1) instanceof Numeral y
 				&& message.getParameters().get(2) instanceof Numeral senderX
-				&& message.getParameters().get(3) instanceof Numeral senderY) {
+				&& message.getParameters().get(3) instanceof Numeral senderY
+				&& message.getParameters().get(5) instanceof Identifier senderLeaderName) {
 
 			synchronized (pendingTeammateRequests) {
-			pendingTeammateRequests.add(new PendingTeammateRequest(sender,
-					x.getValue().intValue(), y.getValue().intValue(),
-					senderX.getValue().intValue(), senderY.getValue().intValue(),
-					message.getParameters().get(4)));
+			pendingTeammateRequests.add(new PendingTeammateRequest(sender, senderLeaderName.getValue(),
+				x.getValue().intValue(), y.getValue().intValue(),
+				senderX.getValue().intValue(), senderY.getValue().intValue(),
+				message.getParameters().get(4)));
 			}
 			return;
 		}
 
 		if (message.getName().equals("teammateReply")
-				&& message.getParameters().size() >= 6
+				&& message.getParameters().size() >= 7
 				&& message.getParameters().get(0) instanceof Identifier identifier
 				&& message.getParameters().get(1) instanceof Numeral x
 				&& message.getParameters().get(2) instanceof Numeral y
 				&& message.getParameters().get(3) instanceof Numeral senderX
 				&& message.getParameters().get(4) instanceof Numeral senderY
+				&& message.getParameters().get(6) instanceof Identifier senderLeaderName
 				&& sender.equals(identifier.getValue())
 				&& isVisibleTeammateAt(-x.getValue().intValue(), -y.getValue().intValue())
 				&& !knownAgents.containsKey(sender)) {
 
-			if (nameNumber(getName()) > nameNumber(sender)) {
+			if (nameNumber(leaderName) > nameNumber(senderLeaderName.getValue())) {
 				int offsetX = senderX.getValue().intValue() + x.getValue().intValue()
 						- internalMap.getAgentX();
 				int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
@@ -197,7 +203,7 @@ public class BasicAgent extends Agent {
 		}
 
 		PendingTeammateRequest request = matchingRequests.get(0);
-		if (nameNumber(getName()) > nameNumber(request.sender())) {
+		if (nameNumber(leaderName) > nameNumber(request.senderLeaderName())) {
 			int offsetX = request.senderX() + request.x() - internalMap.getAgentX();
 			int offsetY = request.senderY() + request.y() - internalMap.getAgentY();
 			internalMap.translate(offsetX, offsetY);
@@ -218,7 +224,8 @@ public class BasicAgent extends Agent {
 				new Numeral(-request.y()),
 				new Numeral(internalMap.getAgentX()),
 				new Numeral(internalMap.getAgentY()),
-				mapParameters()), request.sender(), getName());
+				mapParameters(),
+				new Identifier(leaderName)), request.sender(), getName());
 	}
 
 	private ParameterList mapParameters() {
@@ -556,7 +563,8 @@ public class BasicAgent extends Agent {
 	                new Numeral(teammate.y()),
 	                new Numeral(internalMap.getAgentX()),
 	                new Numeral(internalMap.getAgentY()),
-	                mapParameters()
+	                mapParameters(),
+	                new Identifier(leaderName)
 	        ), getName());
 	    }
 	}
@@ -579,7 +587,8 @@ public class BasicAgent extends Agent {
 					new Numeral(internalMap.getAgentY()),
 					new Numeral(target == null ? Integer.MIN_VALUE : target.x()),
 					new Numeral(target == null ? Integer.MIN_VALUE : target.y()),
-					currentPercepts), agent, getName());
+					currentPercepts,
+					new Identifier(leaderName)), agent, getName());
 		}
 	}
 
