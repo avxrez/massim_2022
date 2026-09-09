@@ -66,11 +66,15 @@ public class BasicAgent extends Agent {
 	private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
 	private final Map<String, InternalMap.Position> knownTargets = new HashMap<>();
 	private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
+	private record VisibleThing(int x, int y, String type, String details) {
+	}
+	private final List<VisibleThing> currentVisibleThings = new ArrayList<>();
+	private static final int VISION_RANGE = 5;
 	private final List<PendingTeammateRequest> pendingTeammateRequests = new ArrayList<>();
 	private final InternalMap internalMap = new InternalMap();
 
 	private record PendingTeammateRequest(String sender, String senderLeaderName, int x, int y,
-			int senderX, int senderY, Parameter map) {
+			int senderX, int senderY, List<VisibleThing> senderVisibleThings) {
 	}
 
 	// ============================================================
@@ -118,6 +122,12 @@ public class BasicAgent extends Agent {
 
 	@Override
 	public void handleMessage(Percept message, String sender) {
+		if (message.getName().equals("mapMerge")
+				&& message.getParameters().size() >= 1) {
+			mergeMap(message.getParameters().get(0));
+			return;
+		}
+
 		if (message.getName().equals("mapUpdate")
 				&& message.getParameters().size() >= 6
 				&& message.getParameters().get(0) instanceof Numeral senderX
@@ -129,7 +139,7 @@ public class BasicAgent extends Agent {
 				System.out.println("Name: " + getName() + ", Leader: " + leaderName + ", Sender: " + sender + ", Sender Leader: " + senderLeaderName.getValue());
 				System.out.println("Received map update from " + sender + " with target (" + targetX.getValue().intValue() + ", " + targetY.getValue().intValue() + ")");
 
-			mergeMap(message.getParameters().get(4), 0, 0);
+			mergeMap(message.getParameters().get(4));
 			knownAgents.put(sender,
 					new InternalMap.Position(
 							senderX.getValue().intValue(), senderY.getValue().intValue()));
@@ -144,33 +154,44 @@ public class BasicAgent extends Agent {
 		}
 
 		if (message.getName().equals("teammateRequest")
-				&& message.getParameters().size() >= 6
+				&& message.getParameters().size() >= 5
 				&& message.getParameters().get(0) instanceof Numeral x
 				&& message.getParameters().get(1) instanceof Numeral y
 				&& message.getParameters().get(2) instanceof Numeral senderX
 				&& message.getParameters().get(3) instanceof Numeral senderY
-				&& message.getParameters().get(5) instanceof Identifier senderLeaderName) {
+				&& message.getParameters().get(4) instanceof Identifier senderLeaderName) {
+			List<VisibleThing> senderVisibleThings = message.getParameters().size() > 5
+					? parseVisibleThings(message.getParameters().get(5))
+					: List.of();
 
 			synchronized (pendingTeammateRequests) {
 			pendingTeammateRequests.add(new PendingTeammateRequest(sender, senderLeaderName.getValue(),
 				x.getValue().intValue(), y.getValue().intValue(),
 				senderX.getValue().intValue(), senderY.getValue().intValue(),
-				message.getParameters().get(4)));
+				senderVisibleThings));
 			}
 			return;
 		}
 
 		if (message.getName().equals("teammateReply")
-				&& message.getParameters().size() >= 7
+				&& message.getParameters().size() >= 6
 				&& message.getParameters().get(0) instanceof Identifier identifier
 				&& message.getParameters().get(1) instanceof Numeral x
 				&& message.getParameters().get(2) instanceof Numeral y
 				&& message.getParameters().get(3) instanceof Numeral senderX
 				&& message.getParameters().get(4) instanceof Numeral senderY
-				&& message.getParameters().get(6) instanceof Identifier senderLeaderName
+				&& message.getParameters().get(5) instanceof Identifier senderLeaderName
 				&& sender.equals(identifier.getValue())
 				&& isVisibleTeammateAt(-x.getValue().intValue(), -y.getValue().intValue())
 				&& !knownAgents.containsKey(sender)) {
+			List<VisibleThing> senderVisibleThings = message.getParameters().size() > 6
+					? parseVisibleThings(message.getParameters().get(6))
+					: List.of();
+
+			if (!isConsistentWithOwnView(-x.getValue().intValue(), -y.getValue().intValue(),
+					senderVisibleThings)) {
+				return;
+			}
 
 			if (nameNumber(leaderName) > nameNumber(senderLeaderName.getValue())) {
 				int offsetX = senderX.getValue().intValue() + x.getValue().intValue()
@@ -178,13 +199,13 @@ public class BasicAgent extends Agent {
 				int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
 						- internalMap.getAgentY();
 				translateWorld(offsetX, offsetY);
+				leaderName = senderLeaderName.getValue();
 			}
-			mergeMap(message.getParameters().get(5), 0, 0);
-
 			knownAgents.put(sender,
 					new InternalMap.Position(
 							internalMap.getAgentX() - x.getValue().intValue(),
 							internalMap.getAgentY() - y.getValue().intValue()));
+			sendMapMerge(sender);
 		}
 	}
 
@@ -198,6 +219,8 @@ public class BasicAgent extends Agent {
 		List<PendingTeammateRequest> matchingRequests = requests.stream()
 				.filter(request -> isVisibleTeammateAt(-request.x(), -request.y()))
 				.filter(request -> !knownAgents.containsKey(request.sender()))
+				.filter(request -> isConsistentWithOwnView(-request.x(), -request.y(),
+						request.senderVisibleThings()))
 				.toList();
 
 		if (matchingRequests.size() != 1) {
@@ -209,11 +232,7 @@ public class BasicAgent extends Agent {
 			int offsetX = request.senderX() + request.x() - internalMap.getAgentX();
 			int offsetY = request.senderY() + request.y() - internalMap.getAgentY();
 			translateWorld(offsetX, offsetY);
-			mergeMap(request.map(), 0, 0);
-		} else {
-			int offsetX = internalMap.getAgentX() - request.x() - request.senderX();
-			int offsetY = internalMap.getAgentY() - request.y() - request.senderY();
-			mergeMap(request.map(), offsetX, offsetY);
+			leaderName = request.senderLeaderName();
 		}
 
 		knownAgents.put(request.sender(),
@@ -226,8 +245,89 @@ public class BasicAgent extends Agent {
 				new Numeral(-request.y()),
 				new Numeral(internalMap.getAgentX()),
 				new Numeral(internalMap.getAgentY()),
-				mapParameters(),
-				new Identifier(leaderName)), request.sender(), getName());
+				new Identifier(leaderName),
+				currentVisibleThingsParameters()), request.sender(), getName());
+		sendMapMerge(request.sender());
+	}
+
+	private void updateCurrentVisibleThings(List<Percept> percepts) {
+		currentVisibleThings.clear();
+		for (Percept percept : percepts) {
+			if (percept.getName().equals("thing")
+					&& percept.getParameters().size() >= 3
+					&& percept.getParameters().get(0) instanceof Numeral x
+					&& percept.getParameters().get(1) instanceof Numeral y
+					&& percept.getParameters().get(2) instanceof Identifier type) {
+
+				String details = "";
+				if (percept.getParameters().size() > 3
+						&& percept.getParameters().get(3) instanceof Identifier identifier) {
+					details = identifier.getValue();
+				}
+
+				currentVisibleThings.add(new VisibleThing(
+						x.getValue().intValue(), y.getValue().intValue(),
+						type.getValue(), details));
+			}
+		}
+	}
+
+	private ParameterList currentVisibleThingsParameters() {
+		ParameterList list = new ParameterList();
+		for (VisibleThing thing : currentVisibleThings) {
+			list.add(new Function("seen",
+					new Identifier(thing.type()),
+					new Numeral(thing.x()),
+					new Numeral(thing.y()),
+					new Identifier(thing.details())));
+		}
+		return list;
+	}
+
+	private List<VisibleThing> parseVisibleThings(Parameter parameter) {
+		List<VisibleThing> things = new ArrayList<>();
+		if (!(parameter instanceof ParameterList list)) {
+			return things;
+		}
+		for (Parameter entry : list) {
+			if (entry instanceof Function function
+					&& function.getName().equals("seen")
+					&& function.getParameters().size() >= 4
+					&& function.getParameters().get(0) instanceof Identifier type
+					&& function.getParameters().get(1) instanceof Numeral x
+					&& function.getParameters().get(2) instanceof Numeral y
+					&& function.getParameters().get(3) instanceof Identifier details) {
+				things.add(new VisibleThing(
+						x.getValue().intValue(), y.getValue().intValue(),
+						type.getValue(), details.getValue()));
+			}
+		}
+		return things;
+	}
+
+	private boolean isConsistentWithOwnView(int relativeX, int relativeY,
+			List<VisibleThing> reportedThings) {
+		for (VisibleThing thing : reportedThings) {
+			int ownX = relativeX + thing.x();
+			int ownY = relativeY + thing.y();
+
+			if (Math.abs(ownX) + Math.abs(ownY) > VISION_RANGE) {
+				continue;
+			}
+
+			boolean matches = currentVisibleThings.stream().anyMatch(own ->
+					own.x() == ownX && own.y() == ownY
+							&& own.type().equals(thing.type()));
+
+			if (!matches) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private void sendMapMerge(String recipient) {
+		sendMessage(new Percept("mapMerge", mapParameters()), recipient, getName());
 	}
 
 	private ParameterList mapParameters() {
@@ -240,21 +340,10 @@ public class BasicAgent extends Agent {
 					new Identifier(observation.details()),
 					new Numeral(observation.lastSeenStep())));
 		}
-		addKnownAgentParameters(map);
 		return map;
 	}
 
-	private void addKnownAgentParameters(ParameterList map) {
-		for (Map.Entry<String, InternalMap.Position> entry : knownAgents.entrySet()) {
-			InternalMap.Position position = entry.getValue();
-			map.add(new Function("agent",
-					new Identifier(entry.getKey()),
-					new Numeral(position.x()),
-					new Numeral(position.y())));
-		}
-	}
-
-	private void mergeMap(Parameter parameter, int offsetX, int offsetY) {
+	private void mergeMap(Parameter parameter) {
 		if (!(parameter instanceof ParameterList map)) {
 			return;
 		}
@@ -272,19 +361,9 @@ public class BasicAgent extends Agent {
 				observations.add(new InternalMap.Observation(
 						type.getValue(), x.getValue().intValue(), y.getValue().intValue(),
 						details.getValue(), step.getValue().intValue()));
-			} else if (entry instanceof Function agent
-					&& agent.getName().equals("agent")
-					&& agent.getParameters().size() >= 3
-					&& agent.getParameters().get(0) instanceof Identifier name
-					&& agent.getParameters().get(1) instanceof Numeral x
-					&& agent.getParameters().get(2) instanceof Numeral y) {
-				knownAgents.put(name.getValue(),
-						new InternalMap.Position(
-								x.getValue().intValue() + offsetX,
-								y.getValue().intValue() + offsetY));
 			}
 		}
-		internalMap.mergeObservations(observations, offsetX, offsetY);
+		internalMap.mergeObservations(observations);
 	}
 
 	private ParameterList currentMapPercepts(List<Percept> percepts) {
@@ -565,8 +644,8 @@ public class BasicAgent extends Agent {
 	                new Numeral(teammate.y()),
 	                new Numeral(internalMap.getAgentX()),
 	                new Numeral(internalMap.getAgentY()),
-	                mapParameters(),
-	                new Identifier(leaderName)
+	                new Identifier(leaderName),
+	                currentVisibleThingsParameters()
 	        ), getName());
 	    }
 	}
@@ -580,7 +659,6 @@ public class BasicAgent extends Agent {
 
 	private void exchangeMapUpdates(List<Percept> percepts) {
 		ParameterList currentPercepts = currentMapPercepts(percepts);
-		addKnownAgentParameters(currentPercepts);
 		for (String agent : knownAgents.keySet()) {
 			if (agent.equals(getName())) {
 				continue;
@@ -1101,6 +1179,7 @@ public class BasicAgent extends Agent {
 		updateBeliefs(percepts);
 
 		updateInternalMap(percepts);
+		updateCurrentVisibleThings(percepts);
 		processTeammateRequests();
 		exchangeTeammateNames();
 

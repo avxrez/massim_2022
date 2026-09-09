@@ -118,19 +118,17 @@ public class InternalMap {
 	}
 
 	/**
-	 * Fügt Beobachtungen einer bereits bekannten Karte mit einem Koordinaten-
-	 * Offset in diese Karte ein.
+	 * Fügt Beobachtungen einer bereits bekannten Karte mit absoluten
+	 * Koordinaten in diese Karte ein.
 	 */
-	public void mergeObservations(List<Observation> observationsToMerge, int offsetX, int offsetY) {
+	public void mergeObservations(List<Observation> observationsToMerge) {
 		for (Observation observation : observationsToMerge) {
-			int mergedX = observation.x() + offsetX;
-			int mergedY = observation.y() + offsetY;
-			removeObservationsForUpdate(mergedX, mergedY, observation.type());
+			removeObservationsForUpdate(observation.x(), observation.y(), observation.type());
 
 			String details = observation.details() == null ? "" : observation.details();
-			ObservationKey key = new ObservationKey(observation.type(), mergedX, mergedY, details);
+			ObservationKey key = new ObservationKey(observation.type(), observation.x(), observation.y(), details);
 			observations.put(key, new Observation(
-					observation.type(), mergedX, mergedY, details, observation.lastSeenStep()));
+					observation.type(), observation.x(), observation.y(), details, observation.lastSeenStep()));
 		}
 	}
 
