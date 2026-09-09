@@ -177,7 +177,7 @@ public class BasicAgent extends Agent {
 						- internalMap.getAgentX();
 				int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
 						- internalMap.getAgentY();
-				internalMap.translate(offsetX, offsetY);
+				translateWorld(offsetX, offsetY);
 			}
 			mergeMap(message.getParameters().get(5), 0, 0);
 
@@ -208,7 +208,7 @@ public class BasicAgent extends Agent {
 		if (nameNumber(leaderName) > nameNumber(request.senderLeaderName())) {
 			int offsetX = request.senderX() + request.x() - internalMap.getAgentX();
 			int offsetY = request.senderY() + request.y() - internalMap.getAgentY();
-			internalMap.translate(offsetX, offsetY);
+			translateWorld(offsetX, offsetY);
 			mergeMap(request.map(), 0, 0);
 		} else {
 			int offsetX = internalMap.getAgentX() - request.x() - request.senderX();
@@ -1017,6 +1017,35 @@ public class BasicAgent extends Agent {
 		return new Action("skip", new Numeral(0), new Numeral(-1));
 
 
+	}
+
+	private void translateWorld(int offsetX, int offsetY) {
+	    internalMap.translate(offsetX, offsetY);
+
+	    for (Map.Entry<String, InternalMap.Position> entry : knownAgents.entrySet()) {
+	        InternalMap.Position position = entry.getValue();
+
+	        entry.setValue(new InternalMap.Position(
+	                position.x() + offsetX,
+	                position.y() + offsetY
+	        ));
+	    }
+
+	    for (Map.Entry<String, InternalMap.Position> entry : knownTargets.entrySet()) {
+	        InternalMap.Position position = entry.getValue();
+
+	        entry.setValue(new InternalMap.Position(
+	                position.x() + offsetX,
+	                position.y() + offsetY
+	        ));
+	    }
+
+	    if (explorationTarget != null) {
+	        explorationTarget = new InternalMap.Position(
+	                explorationTarget.x() + offsetX,
+	                explorationTarget.y() + offsetY
+	        );
+	    }
 	}
 
 	// ============================================================
