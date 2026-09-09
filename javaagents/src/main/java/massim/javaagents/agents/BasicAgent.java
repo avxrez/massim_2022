@@ -126,6 +126,8 @@ public class BasicAgent extends Agent {
 				&& message.getParameters().get(3) instanceof Numeral targetY
 				&& message.getParameters().get(5) instanceof Identifier senderLeaderName
 				&& leaderName.equals(senderLeaderName.getValue())) {
+				System.out.println("Name: " + getName() + ", Leader: " + leaderName + ", Sender: " + sender + ", Sender Leader: " + senderLeaderName.getValue());
+				System.out.println("Received map update from " + sender + " with target (" + targetX.getValue().intValue() + ", " + targetY.getValue().intValue() + ")");
 
 			mergeMap(message.getParameters().get(4), 0, 0);
 			knownAgents.put(sender,
@@ -580,6 +582,9 @@ public class BasicAgent extends Agent {
 		ParameterList currentPercepts = currentMapPercepts(percepts);
 		addKnownAgentParameters(currentPercepts);
 		for (String agent : knownAgents.keySet()) {
+			if (agent.equals(getName())) {
+				continue;
+			}
 			InternalMap.Position target = explorationTarget;
 			sendMessage(new Percept(
 					"mapUpdate",
@@ -867,7 +872,7 @@ public class BasicAgent extends Agent {
 			internalMap, knownTargets, getName());
 
         explorationTarget = target;
-        System.out.println("Exploration target: " + explorationTarget);
+        //System.out.println("Exploration target: " + explorationTarget);
 
         List<String> path = pathPlanner.findPath(start,target,internalMap.getBlockedPositions());
 
@@ -956,7 +961,7 @@ public class BasicAgent extends Agent {
 	 */
 	private Action executeIntention() {
 
-        System.out.println("Current Intention: " + currentIntention);
+        //System.out.println("Current Intention: " + currentIntention);
 
 		if (currentIntention == null) {
 			return skip();
@@ -1052,8 +1057,8 @@ public class BasicAgent extends Agent {
 			return null;
 		}
 
-        System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy + ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");
-		System.out.println("currentIntention: " + currentIntention);
+        //System.out.println(getName() + " - Step: " + currentStep + ", Energy: " + energy + ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");
+		//System.out.println("currentIntention: " + currentIntention);
 		//System.out.println("Current target: " + explorationTarget);
 		//System.out.println(percepts);
 
