@@ -54,6 +54,11 @@ public class InternalMap {
 		return agentY;
 	}
 
+	public void setAgentPosition(int agentX, int agentY) {
+		this.agentX = agentX;
+		this.agentY = agentY;
+	}
+
 	/**
 	 * Aktualisiert die Position des Agenten nach einer erfolgreichen Bewegung.
 	 */
@@ -129,6 +134,20 @@ public class InternalMap {
 			ObservationKey key = new ObservationKey(observation.type(), observation.x(), observation.y(), details);
 			observations.put(key, new Observation(
 					observation.type(), observation.x(), observation.y(), details, observation.lastSeenStep()));
+		}
+	}
+
+	/** Replaces the complete observation map with absolute coordinates. */
+	public void setObservations(List<Observation> newObservations) {
+		observations.clear();
+		occupiedEntityPositions.clear();
+		for (Observation observation : newObservations) {
+			String details = observation.details() == null ? "" : observation.details();
+			ObservationKey key = new ObservationKey(
+					observation.type(), observation.x(), observation.y(), details);
+			observations.put(key, new Observation(
+					observation.type(), observation.x(), observation.y(),
+					details, observation.lastSeenStep()));
 		}
 	}
 
