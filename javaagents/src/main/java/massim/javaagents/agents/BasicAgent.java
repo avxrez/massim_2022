@@ -86,6 +86,10 @@ public class BasicAgent extends Agent {
     private String pendingDirection;
     private String clearDirection;
 
+    private String oldLeaderName = "";
+    private int offsetX = 0;
+    private int offsetY = 0;
+
     // ============================================================
     // PATHFINDING
     // ============================================================
@@ -106,6 +110,7 @@ public class BasicAgent extends Agent {
     public BasicAgent(String name, MailService mailbox) {
         super(name, mailbox);
         leaderName = name;
+        oldLeaderName = name;
     }
 
     // ============================================================
@@ -122,6 +127,12 @@ public class BasicAgent extends Agent {
         if (message.getName().equals("mapMerge")
                 && message.getParameters().size() >= 1) {
             mergeMap(message.getParameters().get(0));
+            if (!oldLeaderName.equals(leaderName)) {
+                notifyknownfornewleader(oldLeaderName, leaderName, offsetX, offsetY);
+            }
+            oldLeaderName = leaderName;
+            offsetX = 0;
+            offsetY = 0;
             return;
         }
 
@@ -138,10 +149,8 @@ public class BasicAgent extends Agent {
             translateKnownPositions(offsetX.getValue().intValue(), offsetY.getValue().intValue());
             internalMap.setAgentPosition(translatedX, translatedY);
             internalMap.setObservations(parseMap(map));
-            String oldLeader = leaderName;
             leaderName = newLeader.getValue();
-            notifyknownfornewleader(oldLeader, leaderName,
-                    offsetX.getValue().intValue(), offsetY.getValue().intValue());
+
             return;
         }
 
@@ -208,14 +217,12 @@ public class BasicAgent extends Agent {
             }
 
             if (nameNumber(leaderName) > nameNumber(senderLeaderName.getValue())) {
-                String oldLeader = leaderName;
-                int offsetX = senderX.getValue().intValue() + x.getValue().intValue()
+                offsetX = senderX.getValue().intValue() + x.getValue().intValue()
                         - internalMap.getAgentX();
-                int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
+                offsetY = senderY.getValue().intValue() + y.getValue().intValue()
                         - internalMap.getAgentY();
                 translateWorld(offsetX, offsetY);
                 leaderName = senderLeaderName.getValue();
-                notifyknownfornewleader(oldLeader, leaderName, offsetX, offsetY);
             }
             knownAgents.put(sender,
                     new InternalMap.Position(
@@ -245,12 +252,10 @@ public class BasicAgent extends Agent {
 
         PendingTeammateRequest request = matchingRequests.get(0);
         if (nameNumber(leaderName) > nameNumber(request.senderLeaderName())) {
-            String oldLeader = leaderName;
-            int offsetX = request.senderX() + request.x() - internalMap.getAgentX();
-            int offsetY = request.senderY() + request.y() - internalMap.getAgentY();
+            offsetX = request.senderX() + request.x() - internalMap.getAgentX();
+            offsetY = request.senderY() + request.y() - internalMap.getAgentY();
             translateWorld(offsetX, offsetY);
             leaderName = request.senderLeaderName();
-            notifyknownfornewleader(oldLeader, leaderName, offsetX, offsetY);
         }
 
         knownAgents.put(request.sender(),
@@ -788,7 +793,6 @@ public class BasicAgent extends Agent {
             desires.add(Desire.WAIT);
             return desires;
         }
-
         // Goal becomes relevant once all required dispensers are known.
         if (hasObservation("goalZone") && hasAllRequiredDispensers()) {
             desires.add(isAtGoalZone() ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
@@ -1010,6 +1014,8 @@ public class BasicAgent extends Agent {
 
         System.out.println(getName() + " - Step: " + currentStep + ", Leader: " + leaderName
                 + ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");
+                System.out.println((""+ " has goal zone: ") + hasObservation("goalZone") + ", has all required dispensers: " + hasAllRequiredDispensers() + ", is at goal zone: " + isAtGoalZone());
+        System.out.println(currentIntention);
 
         // --------------------------------------------------------
         // 2. Update beliefs / world model
