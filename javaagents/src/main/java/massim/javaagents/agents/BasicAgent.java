@@ -65,6 +65,7 @@ public class BasicAgent extends Agent {
 
     private final Set<String> requiredDispenserTypes = new HashSet<>();
     private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
+    private final Map<String, String> knownAgentSources = new HashMap<>();
     private final Map<String, InternalMap.Position> knownTargets = new HashMap<>();
     private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
     private final List<VisibleThing> currentVisibleThings = new ArrayList<>();
@@ -73,8 +74,9 @@ public class BasicAgent extends Agent {
 
     private record VisibleThing(int x, int y, String type, String details) {}
 
-    private record PendingTeammateRequest(String sender, String senderLeaderName, int x, int y,
-            int senderX, int senderY, List<VisibleThing> senderVisibleThings) {}
+        private record PendingTeammateRequest(String sender, String senderLeaderName, int x, int y,
+            int senderX, int senderY, int receiverX, int receiverY,
+            List<VisibleThing> senderVisibleThings) {}
 
     // ============================================================
     // CURRENT INTENTION
@@ -86,9 +88,6 @@ public class BasicAgent extends Agent {
     private String pendingDirection;
     private String clearDirection;
 
-    private String oldLeaderName = "";
-    private int offsetX = 0;
-    private int offsetY = 0;
 
     // ============================================================
     // PATHFINDING
@@ -110,7 +109,6 @@ public class BasicAgent extends Agent {
     public BasicAgent(String name, MailService mailbox) {
         super(name, mailbox);
         leaderName = name;
-        oldLeaderName = name;
     }
 
     // ============================================================
@@ -127,12 +125,7 @@ public class BasicAgent extends Agent {
         if (message.getName().equals("mapMerge")
                 && message.getParameters().size() >= 1) {
             mergeMap(message.getParameters().get(0));
-            if (!oldLeaderName.equals(leaderName)) {
-                notifyknownfornewleader(oldLeaderName, leaderName, offsetX, offsetY);
-            }
-            oldLeaderName = leaderName;
-            offsetX = 0;
-            offsetY = 0;
+            sendMergedMapUpdates();
             return;
         }
 
@@ -144,13 +137,17 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(3) instanceof Numeral offsetY
                 && message.getParameters().get(4) instanceof ParameterList map
                 && leaderName.equals(previousLeader.getValue())) {
-            int translatedX = internalMap.getAgentX() + offsetX.getValue().intValue();
-            int translatedY = internalMap.getAgentY() + offsetY.getValue().intValue();
-            translateKnownPositions(offsetX.getValue().intValue(), offsetY.getValue().intValue());
-            internalMap.setAgentPosition(translatedX, translatedY);
+            translateWorld(offsetX.getValue().intValue(), offsetY.getValue().intValue());
             internalMap.setObservations(parseMap(map));
+            if (message.getParameters().size() > 5) {
+                mergeKnownAgents(message.getParameters().get(5), sender);
+            }
+            System.out.println("Received new leader message from " + sender + " to switch from "
+                    + previousLeader.getValue() + " to " + newLeader.getValue());
             leaderName = newLeader.getValue();
-
+                notifyKnownForNewLeader(previousLeader.getValue(), newLeader.getValue(),
+                    offsetX.getValue().intValue(), offsetY.getValue().intValue(), sender);
+            sendMergedMapUpdates();
             return;
         }
 
@@ -163,9 +160,12 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(5) instanceof Identifier senderLeaderName
                 && leaderName.equals(senderLeaderName.getValue())) {
             mergeMap(message.getParameters().get(4));
-            knownAgents.put(sender,
+                rememberKnownAgent(sender,
                     new InternalMap.Position(
-                            senderX.getValue().intValue(), senderY.getValue().intValue()));
+                        senderX.getValue().intValue(), senderY.getValue().intValue()), sender);
+            if (message.getParameters().size() > 6) {
+                mergeKnownAgents(message.getParameters().get(6), sender);
+            }
             if (targetX.getValue().intValue() == Integer.MIN_VALUE) {
                 knownTargets.remove(sender);
             } else {
@@ -174,6 +174,8 @@ public class BasicAgent extends Agent {
                                 targetX.getValue().intValue(), targetY.getValue().intValue()));
             }
             return;
+        }else if (message.getName().equals("mapUpdate")) {
+            System.out.println("missupdated from " + sender + " with leader " + message.getParameters().get(5) + " and my leader is " + leaderName);
         }
 
         if (message.getName().equals("teammateRequest")
@@ -191,6 +193,7 @@ public class BasicAgent extends Agent {
                 pendingTeammateRequests.add(new PendingTeammateRequest(sender, senderLeaderName.getValue(),
                         x.getValue().intValue(), y.getValue().intValue(),
                         senderX.getValue().intValue(), senderY.getValue().intValue(),
+                    internalMap.getAgentX(), internalMap.getAgentY(),
                         senderVisibleThings));
             }
             return;
@@ -217,17 +220,16 @@ public class BasicAgent extends Agent {
             }
 
             if (nameNumber(leaderName) > nameNumber(senderLeaderName.getValue())) {
-                offsetX = senderX.getValue().intValue() + x.getValue().intValue()
+                int offsetX = senderX.getValue().intValue() + x.getValue().intValue()
                         - internalMap.getAgentX();
-                offsetY = senderY.getValue().intValue() + y.getValue().intValue()
+                int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
                         - internalMap.getAgentY();
-                translateWorld(offsetX, offsetY);
-                leaderName = senderLeaderName.getValue();
+                switchLeader(senderLeaderName.getValue(), offsetX, offsetY);
             }
-            knownAgents.put(sender,
+                rememberKnownAgent(sender,
                     new InternalMap.Position(
-                            internalMap.getAgentX() - x.getValue().intValue(),
-                            internalMap.getAgentY() - y.getValue().intValue()));
+                        internalMap.getAgentX() - x.getValue().intValue(),
+                        internalMap.getAgentY() - y.getValue().intValue()), getName());
             sendMapMerge(sender);
         }
     }
@@ -240,9 +242,11 @@ public class BasicAgent extends Agent {
         }
 
         List<PendingTeammateRequest> matchingRequests = requests.stream()
-                .filter(request -> isVisibleTeammateAt(-request.x(), -request.y()))
+            .filter(request -> isVisibleTeammateAt(
+                -adjustedRelativeX(request), -adjustedRelativeY(request)))
                 .filter(request -> !knownAgents.containsKey(request.sender()))
-                .filter(request -> isConsistentWithOwnView(-request.x(), -request.y(),
+            .filter(request -> isConsistentWithOwnView(
+                -adjustedRelativeX(request), -adjustedRelativeY(request),
                         request.senderVisibleThings()))
                 .toList();
 
@@ -251,26 +255,35 @@ public class BasicAgent extends Agent {
         }
 
         PendingTeammateRequest request = matchingRequests.get(0);
+        int relativeX = adjustedRelativeX(request);
+        int relativeY = adjustedRelativeY(request);
         if (nameNumber(leaderName) > nameNumber(request.senderLeaderName())) {
-            offsetX = request.senderX() + request.x() - internalMap.getAgentX();
-            offsetY = request.senderY() + request.y() - internalMap.getAgentY();
-            translateWorld(offsetX, offsetY);
-            leaderName = request.senderLeaderName();
+            int offsetX = request.senderX() + relativeX - internalMap.getAgentX();
+            int offsetY = request.senderY() + relativeY - internalMap.getAgentY();
+            switchLeader(request.senderLeaderName(), offsetX, offsetY);
         }
 
-        knownAgents.put(request.sender(),
+        rememberKnownAgent(request.sender(),
                 new InternalMap.Position(
-                        internalMap.getAgentX() - request.x(),
-                        internalMap.getAgentY() - request.y()));
+                internalMap.getAgentX() - relativeX,
+                internalMap.getAgentY() - relativeY), getName());
         sendMessage(new Percept("teammateReply",
                 new Identifier(getName()),
-                new Numeral(-request.x()),
-                new Numeral(-request.y()),
+            new Numeral(-relativeX),
+            new Numeral(-relativeY),
                 new Numeral(internalMap.getAgentX()),
                 new Numeral(internalMap.getAgentY()),
                 new Identifier(leaderName),
                 currentVisibleThingsParameters()), request.sender(), getName());
         sendMapMerge(request.sender());
+    }
+
+    private int adjustedRelativeX(PendingTeammateRequest request) {
+        return request.x() - (internalMap.getAgentX() - request.receiverX());
+    }
+
+    private int adjustedRelativeY(PendingTeammateRequest request) {
+        return request.y() - (internalMap.getAgentY() - request.receiverY());
     }
 
     private void updateCurrentVisibleThings(List<Percept> percepts) {
@@ -353,6 +366,44 @@ public class BasicAgent extends Agent {
         sendMessage(new Percept("mapMerge", mapParameters()), recipient, getName());
     }
 
+    private ParameterList knownAgentsParameters() {
+        ParameterList agents = new ParameterList();
+        for (Map.Entry<String, InternalMap.Position> entry : knownAgents.entrySet()) {
+            if (entry.getKey().equals(getName())) {
+                continue;
+            }
+            InternalMap.Position position = entry.getValue();
+            agents.add(new Function("knownAgent",
+                    new Identifier(entry.getKey()),
+                    new Numeral(position.x()),
+                    new Numeral(position.y()),
+                    new Identifier(knownAgentSources.getOrDefault(entry.getKey(), "unknown"))));
+        }
+        return agents;
+    }
+
+    private void mergeKnownAgents(Parameter parameter, String sender) {
+        if (!(parameter instanceof ParameterList agents)) {
+            return;
+        }
+        for (Parameter entry : agents) {
+            if (!(entry instanceof Function knownAgent)
+                    || !knownAgent.getName().equals("knownAgent")
+                    || knownAgent.getParameters().size() < 4
+                    || !(knownAgent.getParameters().get(0) instanceof Identifier agent)
+                    || !(knownAgent.getParameters().get(1) instanceof Numeral x)
+                    || !(knownAgent.getParameters().get(2) instanceof Numeral y)
+                    || !(knownAgent.getParameters().get(3) instanceof Identifier source)
+                    || agent.getValue().equals(getName())) {
+                continue;
+            }
+
+            rememberKnownAgent(agent.getValue(),
+                    new InternalMap.Position(x.getValue().intValue(), y.getValue().intValue()),
+                    sender + ">" + source.getValue());
+        }
+    }
+
     private ParameterList mapParameters() {
         ParameterList map = new ParameterList();
         for (InternalMap.Observation observation : internalMap.getObservations()) {
@@ -366,10 +417,17 @@ public class BasicAgent extends Agent {
         return map;
     }
 
-    private void notifyknownfornewleader(String previousLeader, String newLeader,
-            int offsetX, int offsetY) {
-        for (String agent : knownAgents.keySet()) {
-            if (agent.equals(getName())) {
+    private void switchLeader(String newLeaderName, int deltaX, int deltaY) {
+        String previousLeader = leaderName;
+        translateWorld(deltaX, deltaY);
+        leaderName = newLeaderName;
+        notifyKnownForNewLeader(previousLeader, newLeaderName, deltaX, deltaY, null);
+    }
+
+    private void notifyKnownForNewLeader(String previousLeader, String newLeader,
+            int offsetX, int offsetY, String excludedAgent) {
+        for (String agent : new ArrayList<>(knownAgents.keySet())) {
+            if (agent.equals(getName()) || agent.equals(excludedAgent)) {
                 continue;
             }
             sendMessage(new Percept("newLeader",
@@ -377,7 +435,8 @@ public class BasicAgent extends Agent {
                     new Identifier(newLeader),
                     new Numeral(offsetX),
                     new Numeral(offsetY),
-                    mapParameters()), agent, getName());
+                    mapParameters(),
+                    knownAgentsParameters()), agent, getName());
         }
     }
 
@@ -669,7 +728,29 @@ public class BasicAgent extends Agent {
     }
 
     private void exchangeMapUpdates(List<Percept> percepts) {
-        ParameterList currentPercepts = currentMapPercepts(percepts);
+        ParameterList content = currentMapPercepts(percepts);
+        for (String agent : knownAgents.keySet()) {
+            if (agent.equals(getName())) {
+                continue;
+            }
+            if(currentStep % 10 == 0){
+                content = currentMapPercepts(percepts);
+
+            }
+            InternalMap.Position target = explorationTarget;
+            sendMessage(new Percept(
+                    "mapUpdate",
+                    new Numeral(internalMap.getAgentX()),
+                    new Numeral(internalMap.getAgentY()),
+                    new Numeral(target == null ? Integer.MIN_VALUE : target.x()),
+                    new Numeral(target == null ? Integer.MIN_VALUE : target.y()),
+                    content,
+                    new Identifier(leaderName),
+                    knownAgentsParameters()), agent, getName());
+        }
+    }
+
+    private void sendMergedMapUpdates() {
         for (String agent : knownAgents.keySet()) {
             if (agent.equals(getName())) {
                 continue;
@@ -681,8 +762,9 @@ public class BasicAgent extends Agent {
                     new Numeral(internalMap.getAgentY()),
                     new Numeral(target == null ? Integer.MIN_VALUE : target.x()),
                     new Numeral(target == null ? Integer.MIN_VALUE : target.y()),
-                    currentPercepts,
-                    new Identifier(leaderName)), agent, getName());
+                    mapParameters(),
+                    new Identifier(leaderName),
+                    knownAgentsParameters()), agent, getName());
         }
     }
 
@@ -760,7 +842,7 @@ public class BasicAgent extends Agent {
             // Action succeeded.
             currentIntention = currentIntention.advance();
 
-            if ("clear".equals(lastAction)) {
+            if ("clear".equals(lastAction) && clearDirection != null) {
                 int[] offset = directionOffset(clearDirection);
                 internalMap.forgetObservationsAt(
                         internalMap.getAgentX() + offset[0], internalMap.getAgentY() + offset[1]);
@@ -820,6 +902,22 @@ public class BasicAgent extends Agent {
             }
         }
         return !requiredDispenserTypes.isEmpty() && dispenserTypes.containsAll(requiredDispenserTypes);
+    }
+
+    private void rememberKnownAgent(String agent, InternalMap.Position position, String source) {
+        knownAgents.put(agent, position);
+        knownAgentSources.put(agent, source);
+    }
+
+    private void printDispenserContents() {
+        System.out.println("Known dispensers:");
+        for (InternalMap.Observation observation : internalMap.getObservations()) {
+            if (observation.type().equals("dispenser")) {
+                System.out.println("- content=" + observation.details()
+                        + ", position=(" + observation.x() + ", " + observation.y() + ")"
+                        + ", lastSeenStep=" + observation.lastSeenStep());
+            }
+        }
     }
 
     private boolean isAtGoalZone() {
@@ -1012,10 +1110,11 @@ public class BasicAgent extends Agent {
             return null;
         }
 
-        System.out.println(getName() + " - Step: " + currentStep + ", Leader: " + leaderName
-                + ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");
-                System.out.println((""+ " has goal zone: ") + hasObservation("goalZone") + ", has all required dispensers: " + hasAllRequiredDispensers() + ", is at goal zone: " + isAtGoalZone());
+        System.out.println(getName() + " - Step: " + currentStep + ", Leader: " + leaderName+ ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");System.out.println((""+ " has goal zone: ") + hasObservation("goalZone") + ", has all required dispensers: " + hasAllRequiredDispensers() + ", is at goal zone: " + isAtGoalZone());
+        //printKnownAgentRelations();
         System.out.println(currentIntention);
+        printDispenserContents();
+        
 
         // --------------------------------------------------------
         // 2. Update beliefs / world model
@@ -1048,14 +1147,6 @@ public class BasicAgent extends Agent {
         if (currentIntention == null || currentIntention.finished()) {
             Set<Desire> desires = generateDesires();
             currentIntention = selectIntention(desires);
-        }
-
-        if (currentIntention != null
-                && currentIntention.desire() == Desire.EXPLORE
-                && explorationTarget != null
-                && !explorationTargetSelector.isTargetAllowed(explorationTarget, knownTargets, getName())) {
-            explorationTarget = null;
-            currentIntention = selectIntention(EnumSet.of(Desire.EXPLORE));
         }
 
         exchangeMapUpdates(percepts);

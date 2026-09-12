@@ -27,6 +27,9 @@ public class InternalMap {
      */
     private final Map<ObservationKey, Observation> observations = new HashMap<>();
 
+    /** Index of observation keys by position, so replacing a cell is O(1) on average. */
+    private final Map<Position, Set<ObservationKey>> keysByPosition = new HashMap<>();
+
     /** Zellen, auf denen aktuell (in diesem Schritt) eine Entity gesehen wurde. */
     private final Set<Position> occupiedEntityPositions = new HashSet<>();
 
@@ -88,7 +91,7 @@ public class InternalMap {
         removeObservationsForUpdate(absoluteX, absoluteY, type);
 
         ObservationKey key = new ObservationKey(type, absoluteX, absoluteY, observationDetails);
-        observations.put(key, new Observation(type, absoluteX, absoluteY, observationDetails, step));
+        putObservation(key, new Observation(type, absoluteX, absoluteY, observationDetails, step));
     }
 
     /**
@@ -127,7 +130,7 @@ public class InternalMap {
 
             String details = observation.details() == null ? "" : observation.details();
             ObservationKey key = new ObservationKey(observation.type(), observation.x(), observation.y(), details);
-            observations.put(key, new Observation(
+            putObservation(key, new Observation(
                     observation.type(), observation.x(), observation.y(), details, observation.lastSeenStep()));
         }
     }
@@ -135,12 +138,13 @@ public class InternalMap {
     /** Replaces the complete observation map with absolute coordinates. */
     public void setObservations(List<Observation> newObservations) {
         observations.clear();
+        keysByPosition.clear();
         occupiedEntityPositions.clear();
 
         for (Observation observation : newObservations) {
             String details = observation.details() == null ? "" : observation.details();
             ObservationKey key = new ObservationKey(observation.type(), observation.x(), observation.y(), details);
-            observations.put(key, new Observation(
+            putObservation(key, new Observation(
                     observation.type(), observation.x(), observation.y(), details, observation.lastSeenStep()));
         }
     }
@@ -181,7 +185,7 @@ public class InternalMap {
     public void rememberFailedPath(int x, int y, int step) {
         removeBlockedObservationsAt(x, y);
         ObservationKey key = new ObservationKey("failedPath", x, y, "");
-        observations.put(key, new Observation("failedPath", x, y, "", step));
+        putObservation(key, new Observation("failedPath", x, y, "", step));
     }
 
     // -------------------------------------------------------------------------
@@ -201,7 +205,16 @@ public class InternalMap {
 
     /** Entfernt Hindernis-/failedPath-Beobachtungen an einer absoluten Position. */
     private void removeBlockedObservationsAt(int x, int y) {
-        observations.keySet().removeIf(key -> key.x() == x && key.y() == y && isBlocked(key.type()));
+        Position position = new Position(x, y);
+        Set<ObservationKey> keys = keysByPosition.get(position);
+        if (keys == null) {
+            return;
+        }
+        for (ObservationKey key : new ArrayList<>(keys)) {
+            if (isBlocked(key.type())) {
+                removeObservation(key);
+            }
+        }
     }
 
     /**
@@ -211,8 +224,34 @@ public class InternalMap {
      * anderen Beobachtungen an derselben Position weiter gelten.
      */
     private void removeObservationsForUpdate(int x, int y, String newType) {
-        observations.keySet().removeIf(key ->
-                key.x() == x && key.y() == y && !mustKeepTogether(key.type(), newType));
+        Position position = new Position(x, y);
+        Set<ObservationKey> keys = keysByPosition.get(position);
+        if (keys == null) {
+            return;
+        }
+        for (ObservationKey key : new ArrayList<>(keys)) {
+            if (!mustKeepTogether(key.type(), newType)) {
+                removeObservation(key);
+            }
+        }
+    }
+
+    private void putObservation(ObservationKey key, Observation observation) {
+        observations.put(key, observation);
+        keysByPosition.computeIfAbsent(
+                new Position(key.x(), key.y()), ignored -> new HashSet<>()).add(key);
+    }
+
+    private void removeObservation(ObservationKey key) {
+        observations.remove(key);
+        Position position = new Position(key.x(), key.y());
+        Set<ObservationKey> keys = keysByPosition.get(position);
+        if (keys != null) {
+            keys.remove(key);
+            if (keys.isEmpty()) {
+                keysByPosition.remove(position);
+            }
+        }
     }
 
     private boolean mustKeepTogether(String firstType, String secondType) {
@@ -250,6 +289,12 @@ public class InternalMap {
         }
         observations.clear();
         observations.putAll(translatedObservations);
+
+        keysByPosition.clear();
+        for (ObservationKey key : translatedObservations.keySet()) {
+            keysByPosition.computeIfAbsent(
+                new Position(key.x(), key.y()), ignored -> new HashSet<>()).add(key);
+        }
 
         Set<Position> translatedEntities = new HashSet<>();
         for (Position position : occupiedEntityPositions) {
