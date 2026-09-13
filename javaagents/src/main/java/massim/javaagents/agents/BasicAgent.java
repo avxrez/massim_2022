@@ -304,6 +304,14 @@ public class BasicAgent extends Agent {
                 currentVisibleThings.add(new VisibleThing(
                         x.getValue().intValue(), y.getValue().intValue(),
                         type.getValue(), details));
+                } else if ((percept.getName().equals("goalZone")
+                    || percept.getName().equals("roleZone"))
+                    && percept.getParameters().size() >= 2
+                    && percept.getParameters().get(0) instanceof Numeral x
+                    && percept.getParameters().get(1) instanceof Numeral y) {
+                currentVisibleThings.add(new VisibleThing(
+                    x.getValue().intValue(), y.getValue().intValue(),
+                    percept.getName(), ""));
             }
         }
     }
@@ -353,7 +361,8 @@ public class BasicAgent extends Agent {
 
             boolean matches = currentVisibleThings.stream().anyMatch(own ->
                     own.x() == ownX && own.y() == ownY
-                            && own.type().equals(thing.type()));
+                        && own.type().equals(thing.type())
+                        && own.details().equals(thing.details()));
 
             if (!matches) {
                 return false;
