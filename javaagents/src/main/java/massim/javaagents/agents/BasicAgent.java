@@ -848,8 +848,16 @@ public class BasicAgent extends Agent {
                         internalMap.getAgentX() + offset[0], internalMap.getAgentY() + offset[1]);
             }
         } else {
-            // Action failed.
-            currentIntention = null;
+            if ("move".equals(lastAction) && pendingDirection != null) {
+                int[] offset = directionOffset(pendingDirection);
+                int blockedX = internalMap.getAgentX() + offset[0];
+                int blockedY = internalMap.getAgentY() + offset[1];
+                internalMap.rememberFailedPath(blockedX, blockedY, currentStep);
+                currentIntention = new Intention(
+                        Desire.CLEAR_OBSTACLE, List.of(pendingDirection), 0);
+            } else {
+                currentIntention = null;
+            }
         }
 
         pendingAction = null;
@@ -1061,9 +1069,15 @@ public class BasicAgent extends Agent {
         if (currentIntention.plan().isEmpty()) {
             return skip();
         }
+        String direction = currentIntention.plan().get(currentIntention.nextAction());
+        if (nextMoveIsBlocked(List.of(direction))) {
+            currentIntention = new Intention(
+                    Desire.CLEAR_OBSTACLE, List.of(direction), 0);
+            return executeClear();
+        }
         pendingAction = "move";
-        pendingDirection = currentIntention.plan().get(currentIntention.nextAction());
-        return move(pendingDirection);
+        pendingDirection = direction;
+        return move(direction);
     }
 
     private Action executeClear() {
