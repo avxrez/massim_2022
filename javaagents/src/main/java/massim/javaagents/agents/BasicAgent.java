@@ -54,6 +54,7 @@ public class BasicAgent extends Agent {
     // ============================================================
 
     private static final int VISION_RANGE = 5;
+    private static final int MIN_SHARED_VERIFICATION_THINGS = 3;
 
     private String leaderName = "";
     private int lastID = -1;
@@ -66,6 +67,8 @@ public class BasicAgent extends Agent {
     private final Set<String> requiredDispenserTypes = new HashSet<>();
     private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
     private final Map<String, String> knownAgentSources = new HashMap<>();
+    private final Map<String, PendingTeammateConfirmation> pendingTeammateConfirmations = new HashMap<>();
+    private final Map<String, PendingTeammateConfirmation> pendingTeammateAcceptances = new HashMap<>();
     private final Map<String, InternalMap.Position> knownTargets = new HashMap<>();
     private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
     private final List<VisibleThing> currentVisibleThings = new ArrayList<>();
@@ -77,6 +80,9 @@ public class BasicAgent extends Agent {
         private record PendingTeammateRequest(String sender, String senderLeaderName, int x, int y,
             int senderX, int senderY, int receiverX, int receiverY,
             List<VisibleThing> senderVisibleThings) {}
+
+        private record PendingTeammateConfirmation(String senderLeaderName, int senderX, int senderY,
+            int relativeX, int relativeY) {}
 
     // ============================================================
     // CURRENT INTENTION
@@ -219,18 +225,59 @@ public class BasicAgent extends Agent {
                 return;
             }
 
-            if (nameNumber(leaderName) > nameNumber(senderLeaderName.getValue())) {
-                int offsetX = senderX.getValue().intValue() + x.getValue().intValue()
-                        - internalMap.getAgentX();
-                int offsetY = senderY.getValue().intValue() + y.getValue().intValue()
-                        - internalMap.getAgentY();
-                switchLeader(senderLeaderName.getValue(), offsetX, offsetY);
+                pendingTeammateAcceptances.put(sender,
+                    new PendingTeammateConfirmation(
+                        senderLeaderName.getValue(), senderX.getValue().intValue(),
+                        senderY.getValue().intValue(), x.getValue().intValue(),
+                        y.getValue().intValue()));
+                sendMessage(new Percept("teammateConfirm", new Identifier(getName())),
+                    sender, getName());
+                return;
             }
-                rememberKnownAgent(sender,
-                    new InternalMap.Position(
-                        internalMap.getAgentX() - x.getValue().intValue(),
-                        internalMap.getAgentY() - y.getValue().intValue()), getName());
-            sendMapMerge(sender);
+
+        if (message.getName().equals("teammateConfirm")
+                    && message.getParameters().size() >= 1
+                    && message.getParameters().get(0) instanceof Identifier identifier
+                    && sender.equals(identifier.getValue())) {
+            PendingTeammateConfirmation confirmation = pendingTeammateConfirmations.remove(sender);
+            if (confirmation != null) {
+                    if (nameNumber(leaderName) > nameNumber(confirmation.senderLeaderName())) {
+                        int offsetX = confirmation.senderX() + confirmation.relativeX()
+                            - internalMap.getAgentX();
+                        int offsetY = confirmation.senderY() + confirmation.relativeY()
+                            - internalMap.getAgentY();
+                        switchLeader(confirmation.senderLeaderName(), offsetX, offsetY);
+                    }
+                    rememberKnownAgent(sender,
+                        new InternalMap.Position(
+                            internalMap.getAgentX() - confirmation.relativeX(),
+                            internalMap.getAgentY() - confirmation.relativeY()), getName());
+                        sendMessage(new Percept("teammateConfirmed", new Identifier(getName())),
+                            sender, getName());
+                        }
+                        return;
+                    }
+
+                    if (message.getName().equals("teammateConfirmed")
+                        && message.getParameters().size() >= 1
+                        && message.getParameters().get(0) instanceof Identifier identifier
+                        && sender.equals(identifier.getValue())) {
+                        PendingTeammateConfirmation confirmation = pendingTeammateAcceptances.remove(sender);
+                        if (confirmation != null) {
+                        if (nameNumber(leaderName) > nameNumber(confirmation.senderLeaderName())) {
+                            int offsetX = confirmation.senderX() + confirmation.relativeX()
+                                - internalMap.getAgentX();
+                            int offsetY = confirmation.senderY() + confirmation.relativeY()
+                                - internalMap.getAgentY();
+                            switchLeader(confirmation.senderLeaderName(), offsetX, offsetY);
+                        }
+                        rememberKnownAgent(sender,
+                            new InternalMap.Position(
+                                internalMap.getAgentX() - confirmation.relativeX(),
+                                internalMap.getAgentY() - confirmation.relativeY()), getName());
+                        sendMapMerge(sender);
+                        }
+                        return;
         }
     }
 
@@ -257,16 +304,10 @@ public class BasicAgent extends Agent {
         PendingTeammateRequest request = matchingRequests.get(0);
         int relativeX = adjustedRelativeX(request);
         int relativeY = adjustedRelativeY(request);
-        if (nameNumber(leaderName) > nameNumber(request.senderLeaderName())) {
-            int offsetX = request.senderX() + relativeX - internalMap.getAgentX();
-            int offsetY = request.senderY() + relativeY - internalMap.getAgentY();
-            switchLeader(request.senderLeaderName(), offsetX, offsetY);
-        }
-
-        rememberKnownAgent(request.sender(),
-                new InternalMap.Position(
-                internalMap.getAgentX() - relativeX,
-                internalMap.getAgentY() - relativeY), getName());
+        pendingTeammateConfirmations.put(request.sender(),
+                new PendingTeammateConfirmation(
+                    request.senderLeaderName(), request.senderX(), request.senderY(),
+                    relativeX, relativeY));
         sendMessage(new Percept("teammateReply",
                 new Identifier(getName()),
             new Numeral(-relativeX),
@@ -275,7 +316,6 @@ public class BasicAgent extends Agent {
                 new Numeral(internalMap.getAgentY()),
                 new Identifier(leaderName),
                 currentVisibleThingsParameters()), request.sender(), getName());
-        sendMapMerge(request.sender());
     }
 
     private int adjustedRelativeX(PendingTeammateRequest request) {
@@ -351,6 +391,8 @@ public class BasicAgent extends Agent {
 
     private boolean isConsistentWithOwnView(int relativeX, int relativeY,
             List<VisibleThing> reportedThings) {
+        int matchingVerificationThings = 0;
+
         for (VisibleThing thing : reportedThings) {
             int ownX = relativeX + thing.x();
             int ownY = relativeY + thing.y();
@@ -367,8 +409,12 @@ public class BasicAgent extends Agent {
             if (!matches) {
                 return false;
             }
+
+            if (!thing.type().equals("entity")) {
+                matchingVerificationThings++;
+            }
         }
-        return true;
+        return matchingVerificationThings >= MIN_SHARED_VERIFICATION_THINGS;
     }
 
     private void sendMapMerge(String recipient) {
