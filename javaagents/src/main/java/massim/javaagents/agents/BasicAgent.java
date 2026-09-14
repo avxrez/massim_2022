@@ -31,7 +31,9 @@ public class BasicAgent extends Agent {
         EXPLORE,
         CLEAR_OBSTACLE,
         REACH_GOAL_ZONE,
-        WAIT
+        WAIT,
+        REACH_ROLE_ZONE,
+        ADAPT_ROLE
     }
 
     // ============================================================
@@ -70,7 +72,6 @@ public class BasicAgent extends Agent {
     private final Map<String, PendingTeammateConfirmation> pendingTeammateConfirmations = new HashMap<>();
     private final Map<String, PendingTeammateConfirmation> pendingTeammateAcceptances = new HashMap<>();
     private final Map<String, InternalMap.Position> knownTargets = new HashMap<>();
-    private final Set<InternalMap.Position> visibleTeammates = new HashSet<>();
     private final List<VisibleThing> currentVisibleThings = new ArrayList<>();
     private final List<PendingTeammateRequest> pendingTeammateRequests = new ArrayList<>();
     private final InternalMap internalMap = new InternalMap();
@@ -130,7 +131,7 @@ public class BasicAgent extends Agent {
     public void handleMessage(Percept message, String sender) {
         if (message.getName().equals("mapMerge")
                 && message.getParameters().size() >= 1) {
-            mergeMap(message.getParameters().get(0));
+            internalMap.mergeObservations(message.getParameters().get(0));
             sendMergedMapUpdates();
             return;
         }
@@ -144,7 +145,7 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(4) instanceof ParameterList map
                 && leaderName.equals(previousLeader.getValue())) {
             translateWorld(offsetX.getValue().intValue(), offsetY.getValue().intValue());
-            internalMap.setObservations(parseMap(map));
+            internalMap.setObservations(map);
             if (message.getParameters().size() > 5) {
                 mergeKnownAgents(message.getParameters().get(5), sender);
             }
@@ -165,7 +166,7 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(3) instanceof Numeral targetY
                 && message.getParameters().get(5) instanceof Identifier senderLeaderName
                 && leaderName.equals(senderLeaderName.getValue())) {
-            mergeMap(message.getParameters().get(4));
+            internalMap.mergeObservations(message.getParameters().get(4));
                 rememberKnownAgent(sender,
                     new InternalMap.Position(
                         senderX.getValue().intValue(), senderY.getValue().intValue()), sender);
@@ -460,16 +461,7 @@ public class BasicAgent extends Agent {
     }
 
     private ParameterList mapParameters() {
-        ParameterList map = new ParameterList();
-        for (InternalMap.Observation observation : internalMap.getObservations()) {
-            map.add(new Function("observation",
-                    new Identifier(observation.type()),
-                    new Numeral(observation.x()),
-                    new Numeral(observation.y()),
-                    new Identifier(observation.details()),
-                    new Numeral(observation.lastSeenStep())));
-        }
-        return map;
+        return internalMap.toParameterList();
     }
 
     private void switchLeader(String newLeaderName, int deltaX, int deltaY) {
@@ -519,74 +511,8 @@ public class BasicAgent extends Agent {
         translateKnownPositions(offsetX, offsetY);
     }
 
-    private void mergeMap(Parameter parameter) {
-        if (!(parameter instanceof ParameterList map)) {
-            return;
-        }
-        internalMap.mergeObservations(parseMap(map));
-    }
-
-    private List<InternalMap.Observation> parseMap(ParameterList map) {
-        List<InternalMap.Observation> observations = new ArrayList<>();
-        for (Parameter entry : map) {
-            if (entry instanceof Function observation
-                    && observation.getName().equals("observation")
-                    && observation.getParameters().size() >= 5
-                    && observation.getParameters().get(0) instanceof Identifier type
-                    && observation.getParameters().get(1) instanceof Numeral x
-                    && observation.getParameters().get(2) instanceof Numeral y
-                    && observation.getParameters().get(3) instanceof Identifier details
-                    && observation.getParameters().get(4) instanceof Numeral step) {
-                observations.add(new InternalMap.Observation(
-                        type.getValue(), x.getValue().intValue(), y.getValue().intValue(),
-                        details.getValue(), step.getValue().intValue()));
-            }
-        }
-        return observations;
-    }
-
     private ParameterList currentMapPercepts(List<Percept> percepts) {
-        ParameterList map = new ParameterList();
-        int step = currentStep;
-
-        for (Percept percept : percepts) {
-            if (percept.getName().equals("thing")
-                    && percept.getParameters().size() >= 3
-                    && percept.getParameters().get(0) instanceof Numeral x
-                    && percept.getParameters().get(1) instanceof Numeral y
-                    && percept.getParameters().get(2) instanceof Identifier type) {
-
-                if (type.getValue().equals("entity")) {
-                    continue;
-                }
-
-                String details = "";
-                if (percept.getParameters().size() > 3
-                        && percept.getParameters().get(3) instanceof Identifier identifier) {
-                    details = identifier.getValue();
-                }
-
-                map.add(new Function("observation",
-                        new Identifier(type.getValue()),
-                        new Numeral(internalMap.getAgentX() + x.getValue().intValue()),
-                        new Numeral(internalMap.getAgentY() + y.getValue().intValue()),
-                        new Identifier(details),
-                        new Numeral(step)));
-            } else if ((percept.getName().equals("goalZone")
-                    || percept.getName().equals("roleZone"))
-                    && percept.getParameters().size() >= 2
-                    && percept.getParameters().get(0) instanceof Numeral x
-                    && percept.getParameters().get(1) instanceof Numeral y) {
-
-                map.add(new Function("observation",
-                        new Identifier(percept.getName()),
-                        new Numeral(internalMap.getAgentX() + x.getValue().intValue()),
-                        new Numeral(internalMap.getAgentY() + y.getValue().intValue()),
-                        new Identifier(""),
-                        new Numeral(step)));
-            }
-        }
-        return map;
+        return internalMap.currentPercepts(percepts, currentStep);
     }
 
     /**
@@ -594,127 +520,7 @@ public class BasicAgent extends Agent {
      * move action.
      */
     private void updateAgentPosition(List<Percept> percepts) {
-        String lastAction = null;
-        String lastActionResult = null;
-        String direction = null;
-
-        for (Percept percept : percepts) {
-            switch (percept.getName()) {
-                case "lastAction" -> {
-                    if (!percept.getParameters().isEmpty()
-                            && percept.getParameters().get(0) instanceof Identifier identifier) {
-                        lastAction = identifier.getValue();
-                    }
-                }
-                case "lastActionResult" -> {
-                    if (!percept.getParameters().isEmpty()
-                            && percept.getParameters().get(0) instanceof Identifier identifier) {
-                        lastActionResult = identifier.getValue();
-                    }
-                }
-                case "lastActionParams" -> {
-                    if (!percept.getParameters().isEmpty()
-                            && percept.getParameters().get(0) instanceof ParameterList parameters
-                            && parameters.size() == 1
-                            && parameters.get(0) instanceof Identifier identifier) {
-                        direction = identifier.getValue();
-                    }
-                }
-                default -> {
-                    // Not relevant for position updates.
-                }
-            }
-        }
-
-        if ("move".equals(lastAction) && "success".equals(lastActionResult) && direction != null) {
-            internalMap.updateAgentPosition(direction);
-        }
-    }
-
-    /**
-     * Updates the internal map with currently visible information.
-     */
-    private void updateInternalMap(List<Percept> percepts) {
-        int step = -1;
-        int vision = -1;
-        Set<String> occupiedPositions = new HashSet<>();
-
-        // --------------------------------------------------------
-        // Read step and vision
-        // --------------------------------------------------------
-
-        for (Percept percept : percepts) {
-            if (percept.getName().equals("step")
-                    && !percept.getParameters().isEmpty()
-                    && percept.getParameters().get(0) instanceof Numeral numeral) {
-                step = numeral.getValue().intValue();
-            } else if (percept.getName().equals("role")
-                    && percept.getParameters().size() >= 2
-                    && percept.getParameters().get(1) instanceof Numeral numeral) {
-                vision = numeral.getValue().intValue();
-            }
-        }
-
-        if (step < 0) {
-            return;
-        }
-
-        internalMap.clearOccupiedEntityPositions();
-        visibleTeammates.clear();
-
-        // --------------------------------------------------------
-        // Read visible objects
-        // --------------------------------------------------------
-
-        for (Percept percept : percepts) {
-            String type = percept.getName();
-
-            if (type.equals("thing") && percept.getParameters().size() >= 3) {
-                int x = ((Numeral) percept.getParameters().get(0)).getValue().intValue();
-                int y = ((Numeral) percept.getParameters().get(1)).getValue().intValue();
-                occupiedPositions.add(x + "," + y);
-
-                String thingType = ((Identifier) percept.getParameters().get(2)).getValue();
-                String details = "";
-                if (percept.getParameters().size() > 3
-                        && percept.getParameters().get(3) instanceof Identifier identifier) {
-                    details = identifier.getValue();
-                }
-
-                if (!thingType.equals("entity")) {
-                    // Entities are dynamic and therefore are not stored
-                    // as permanent map obstacles.
-                    internalMap.rememberObservation(thingType, x, y, details, step);
-                } else {
-                    internalMap.rememberFreeCell(x, y, step);
-                    internalMap.rememberOccupiedEntity(x, y);
-
-                    if (!teamName.isEmpty()
-                            && !(x == 0 && y == 0)
-                            && teamName.equals(details)) {
-                        visibleTeammates.add(new InternalMap.Position(x, y));
-                    }
-                }
-            } else if ((type.equals("goalZone") || type.equals("roleZone")) && percept.getParameters().size() >= 2) {
-                int x = ((Numeral) percept.getParameters().get(0)).getValue().intValue();
-                int y = ((Numeral) percept.getParameters().get(1)).getValue().intValue();
-                internalMap.rememberObservation(type, x, y, "", step);
-            }
-        }
-
-        // --------------------------------------------------------
-        // Mark visible empty cells as free
-        // --------------------------------------------------------
-
-        if (vision >= 0) {
-            for (int x = -vision; x <= vision; x++) {
-                for (int y = -vision; y <= vision; y++) {
-                    if (Math.abs(x) + Math.abs(y) <= vision && !occupiedPositions.contains(x + "," + y)) {
-                        internalMap.rememberFreeCell(x, y, step);
-                    }
-                }
-            }
-        }
+        internalMap.updateAgentPositionFromPercepts(percepts);
     }
 
     // ============================================================
@@ -749,7 +555,7 @@ public class BasicAgent extends Agent {
     }
 
     private boolean isVisibleTeammateAt(int x, int y) {
-        return visibleTeammates.contains(new InternalMap.Position(x, y));
+        return internalMap.getVisibleTeammates().contains(new InternalMap.Position(x, y));
     }
 
     private int nameNumber(String name) {
@@ -758,7 +564,7 @@ public class BasicAgent extends Agent {
     }
 
     private void exchangeTeammateNames() {
-        for (InternalMap.Position teammate : visibleTeammates) {
+        for (InternalMap.Position teammate : internalMap.getVisibleTeammates()) {
             if (isKnownTeammateAt(teammate)) {
                 continue;
             }
@@ -1191,7 +997,7 @@ public class BasicAgent extends Agent {
 
         updateAgentPosition(percepts);
         updateBeliefs(percepts);
-        updateInternalMap(percepts);
+        internalMap.updateFromPercepts(percepts, teamName);
         updateCurrentVisibleThings(percepts);
         processTeammateRequests();
         exchangeTeammateNames();

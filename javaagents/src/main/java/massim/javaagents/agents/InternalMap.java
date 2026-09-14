@@ -1,5 +1,12 @@
 package massim.javaagents.agents;
 
+import eis.iilang.Function;
+import eis.iilang.Identifier;
+import eis.iilang.Numeral;
+import eis.iilang.Parameter;
+import eis.iilang.ParameterList;
+import eis.iilang.Percept;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -32,6 +39,9 @@ public class InternalMap {
 
     /** Zellen, auf denen aktuell (in diesem Schritt) eine Entity gesehen wurde. */
     private final Set<Position> occupiedEntityPositions = new HashSet<>();
+
+    /** Zellen, auf denen aktuell sichtbare Teammitglieder stehen. */
+    private final Set<Position> visibleTeammates = new HashSet<>();
 
     // -------------------------------------------------------------------------
     // Data classes
@@ -73,6 +83,33 @@ public class InternalMap {
         }
     }
 
+    /** Aktualisiert die eigene Kartenposition aus dem Ergebnis des letzten Zuges. */
+    public void updateAgentPositionFromPercepts(List<Percept> percepts) {
+        String lastAction = null;
+        String lastActionResult = null;
+        String direction = null;
+
+        for (Percept percept : percepts) {
+            if (percept.getName().equals("lastAction") && !percept.getParameters().isEmpty()
+                    && percept.getParameters().get(0) instanceof Identifier identifier) {
+                lastAction = identifier.getValue();
+            } else if (percept.getName().equals("lastActionResult") && !percept.getParameters().isEmpty()
+                    && percept.getParameters().get(0) instanceof Identifier identifier) {
+                lastActionResult = identifier.getValue();
+            } else if (percept.getName().equals("lastActionParams")
+                    && !percept.getParameters().isEmpty()
+                    && percept.getParameters().get(0) instanceof ParameterList parameters
+                    && parameters.size() == 1
+                    && parameters.get(0) instanceof Identifier identifier) {
+                direction = identifier.getValue();
+            }
+        }
+
+        if ("move".equals(lastAction) && "success".equals(lastActionResult) && direction != null) {
+            updateAgentPosition(direction);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Remember observations
     // -------------------------------------------------------------------------
@@ -107,6 +144,157 @@ public class InternalMap {
 
     public void rememberOccupiedEntity(int relativeX, int relativeY) {
         occupiedEntityPositions.add(new Position(agentX + relativeX, agentY + relativeY));
+    }
+
+    /** Aktualisiert die Karte und die aktuell sichtbaren Teammitglieder aus Percepts. */
+    public void updateFromPercepts(List<Percept> percepts, String teamName) {
+        int step = -1;
+        int vision = -1;
+        Set<Position> occupiedRelativePositions = new HashSet<>();
+
+        for (Percept percept : percepts) {
+            if (percept.getName().equals("step")
+                    && !percept.getParameters().isEmpty()
+                    && percept.getParameters().get(0) instanceof Numeral numeral) {
+                step = numeral.getValue().intValue();
+            } else if (percept.getName().equals("role")
+                    && percept.getParameters().size() >= 2
+                    && percept.getParameters().get(1) instanceof Numeral numeral) {
+                vision = numeral.getValue().intValue();
+            }
+        }
+
+        if (step < 0) {
+            return;
+        }
+
+        clearOccupiedEntityPositions();
+        visibleTeammates.clear();
+
+        for (Percept percept : percepts) {
+            if (percept.getName().equals("thing") && percept.getParameters().size() >= 3
+                    && percept.getParameters().get(0) instanceof Numeral x
+                    && percept.getParameters().get(1) instanceof Numeral y
+                    && percept.getParameters().get(2) instanceof Identifier type) {
+                int relativeX = x.getValue().intValue();
+                int relativeY = y.getValue().intValue();
+                occupiedRelativePositions.add(new Position(relativeX, relativeY));
+                String details = percept.getParameters().size() > 3
+                        && percept.getParameters().get(3) instanceof Identifier identifier
+                        ? identifier.getValue() : "";
+
+                if (type.getValue().equals("entity")) {
+                    rememberFreeCell(relativeX, relativeY, step);
+                    rememberOccupiedEntity(relativeX, relativeY);
+                    if (!teamName.isEmpty() && !(relativeX == 0 && relativeY == 0)
+                            && teamName.equals(details)) {
+                        visibleTeammates.add(new Position(relativeX, relativeY));
+                    }
+                } else {
+                    rememberObservation(type.getValue(), relativeX, relativeY, details, step);
+                }
+            } else if ((percept.getName().equals("goalZone") || percept.getName().equals("roleZone"))
+                    && percept.getParameters().size() >= 2
+                    && percept.getParameters().get(0) instanceof Numeral x
+                    && percept.getParameters().get(1) instanceof Numeral y) {
+                rememberObservation(percept.getName(), x.getValue().intValue(), y.getValue().intValue(), "", step);
+            }
+        }
+
+        if (vision >= 0) {
+            for (int x = -vision; x <= vision; x++) {
+                for (int y = -vision; y <= vision; y++) {
+                    if (Math.abs(x) + Math.abs(y) <= vision
+                            && !occupiedRelativePositions.contains(new Position(x, y))) {
+                        rememberFreeCell(x, y, step);
+                    }
+                }
+            }
+        }
+    }
+
+    public Set<Position> getVisibleTeammates() {
+        return Set.copyOf(visibleTeammates);
+    }
+
+    /** Liest absolute Kartenbeobachtungen aus einer Nachrichtenliste ein. */
+    public void mergeObservations(Parameter parameter) {
+        if (!(parameter instanceof ParameterList map)) {
+            return;
+        }
+        mergeObservations(parseObservations(map));
+    }
+
+    public void setObservations(Parameter parameter) {
+        if (!(parameter instanceof ParameterList map)) {
+            return;
+        }
+        setObservations(parseObservations(map));
+    }
+
+    /** Serialisiert die Karte für Agentennachrichten. */
+    public ParameterList toParameterList() {
+        ParameterList map = new ParameterList();
+        for (Observation observation : observations.values()) {
+            map.add(new Function("observation",
+                    new Identifier(observation.type()),
+                    new Numeral(observation.x()),
+                    new Numeral(observation.y()),
+                    new Identifier(observation.details()),
+                    new Numeral(observation.lastSeenStep())));
+        }
+        return map;
+    }
+
+    /** Erstellt absolute Kartenbeobachtungen aus den aktuellen lokalen Percepts. */
+    public ParameterList currentPercepts(List<Percept> percepts, int step) {
+        ParameterList map = new ParameterList();
+        for (Percept percept : percepts) {
+            if (percept.getName().equals("thing") && percept.getParameters().size() >= 3
+                    && percept.getParameters().get(0) instanceof Numeral x
+                    && percept.getParameters().get(1) instanceof Numeral y
+                    && percept.getParameters().get(2) instanceof Identifier type) {
+                if (type.getValue().equals("entity")) {
+                    continue;
+                }
+                String details = percept.getParameters().size() > 3
+                        && percept.getParameters().get(3) instanceof Identifier identifier
+                        ? identifier.getValue() : "";
+                map.add(observationParameter(type.getValue(),
+                        agentX + x.getValue().intValue(), agentY + y.getValue().intValue(),
+                        details, step));
+            } else if ((percept.getName().equals("goalZone") || percept.getName().equals("roleZone"))
+                    && percept.getParameters().size() >= 2
+                    && percept.getParameters().get(0) instanceof Numeral x
+                    && percept.getParameters().get(1) instanceof Numeral y) {
+                map.add(observationParameter(percept.getName(),
+                        agentX + x.getValue().intValue(), agentY + y.getValue().intValue(), "", step));
+            }
+        }
+        return map;
+    }
+
+    private static Function observationParameter(String type, int x, int y, String details, int step) {
+        return new Function("observation", new Identifier(type), new Numeral(x), new Numeral(y),
+                new Identifier(details), new Numeral(step));
+    }
+
+    private static List<Observation> parseObservations(ParameterList map) {
+        List<Observation> parsed = new ArrayList<>();
+        for (Parameter entry : map) {
+            if (entry instanceof Function observation
+                    && observation.getName().equals("observation")
+                    && observation.getParameters().size() >= 5
+                    && observation.getParameters().get(0) instanceof Identifier type
+                    && observation.getParameters().get(1) instanceof Numeral x
+                    && observation.getParameters().get(2) instanceof Numeral y
+                    && observation.getParameters().get(3) instanceof Identifier details
+                    && observation.getParameters().get(4) instanceof Numeral step) {
+                parsed.add(new Observation(type.getValue(), x.getValue().intValue(), y.getValue().intValue(),
+                        details.getValue(), step.getValue().intValue()));
+            }
+        }
+        return parsed;
     }
 
     // -------------------------------------------------------------------------
