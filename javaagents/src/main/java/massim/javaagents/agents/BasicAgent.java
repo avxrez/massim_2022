@@ -57,12 +57,16 @@ public class BasicAgent extends Agent {
 
     private static final int VISION_RANGE = 5;
     private static final int MIN_SHARED_VERIFICATION_THINGS = 3;
+    private static final int ROLE_ZONE_MAX_DISTANCE = 20;
+    private static final String DEFAULT_ROLE = "default";
+    private static final String WORKER_ROLE = "worker";
 
     private String leaderName = "";
     private int lastID = -1;
     private int currentStep = -1;
     private int energy = -1;
     private boolean deactivated;
+    private String currentRole = "";
     private String currentTask;
     private String teamName = "";
 
@@ -90,6 +94,7 @@ public class BasicAgent extends Agent {
     // ============================================================
 
     private InternalMap.Position explorationTarget;
+    private boolean explorationFinished;
     private Intention currentIntention;
     private String pendingAction;
     private String pendingDirection;
@@ -541,6 +546,12 @@ public class BasicAgent extends Agent {
             switch (percept.getName()) {
                 case "step" -> currentStep = numberValue(percept, currentStep);
                 case "energy" -> energy = numberValue(percept, energy);
+                case "role" -> {
+                    if (percept.getParameters().size() == 1
+                            && percept.getParameters().get(0) instanceof Identifier identifier) {
+                        currentRole = identifier.getValue();
+                    }
+                }
                 case "team" -> teamName = identifierValue(percept, teamName);
                 case "deactivated" -> deactivated = identifierValue(percept, "false").equals("true");
                 case "task" -> {
@@ -744,8 +755,23 @@ public class BasicAgent extends Agent {
             desires.add(Desire.WAIT);
             return desires;
         }
+        if (DEFAULT_ROLE.equals(currentRole)) {
+            if (isAtRoleZone()) {
+                desires.add(Desire.ADAPT_ROLE);
+                return desires;
+            }
+            InternalMap.Observation roleZone = findNearestRoleZone();
+            if (roleZone != null
+                    && (explorationFinished
+                        || distanceTo(roleZone.x(), roleZone.y(), internalMap.getAgentX(), internalMap.getAgentY())
+                            <= ROLE_ZONE_MAX_DISTANCE)) {
+                desires.add(Desire.REACH_ROLE_ZONE);
+                return desires;
+            }
+        }
         // Goal becomes relevant once all required dispensers are known.
-        if (hasObservation("goalZone") && hasAllRequiredDispensers()) {
+            if (!currentRole.isEmpty() && !DEFAULT_ROLE.equals(currentRole)
+                && hasObservation("goalZone") && hasAllRequiredDispensers()) {
             desires.add(isAtGoalZone() ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
             return desires;
         }
@@ -813,6 +839,12 @@ public class BasicAgent extends Agent {
         if (desires.contains(Desire.CLEAR_OBSTACLE)) {
             return new Intention(Desire.CLEAR_OBSTACLE, List.of(), 0);
         }
+        if (desires.contains(Desire.ADAPT_ROLE)) {
+            return new Intention(Desire.ADAPT_ROLE, List.of(WORKER_ROLE), 0);
+        }
+        if (desires.contains(Desire.REACH_ROLE_ZONE)) {
+            return createRoleZoneIntention();
+        }
         if (desires.contains(Desire.REACH_GOAL_ZONE)) {
             return createGoalIntention();
         }
@@ -820,6 +852,22 @@ public class BasicAgent extends Agent {
             return createExploreIntention();
         }
         return null;
+    }
+
+    private Intention createRoleZoneIntention() {
+        InternalMap.Observation roleZone = findNearestRoleZone();
+        if (roleZone == null) {
+            return null;
+        }
+
+        List<String> path = pathPlanner.findPath(
+                currentPosition(),
+                new InternalMap.Position(roleZone.x(), roleZone.y()),
+                internalMap.getBlockedPositions());
+        if (nextMoveIsBlocked(path)) {
+            return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
+        }
+        return new Intention(Desire.REACH_ROLE_ZONE, path, 0);
     }
 
     /**
@@ -889,6 +937,50 @@ public class BasicAgent extends Agent {
                 .orElseThrow();
     }
 
+            private InternalMap.Observation findNearestRoleZone() {
+            int agentX = internalMap.getAgentX();
+            int agentY = internalMap.getAgentY();
+
+            return internalMap.getObservations().stream()
+                .filter(observation -> observation.type().equals("roleZone"))
+                .min((first, second) -> Integer.compare(
+                    distanceTo(first.x(), first.y(), agentX, agentY),
+                    distanceTo(second.x(), second.y(), agentX, agentY)))
+                .orElse(null);
+            }
+
+            private boolean isAtRoleZone() {
+            int agentX = internalMap.getAgentX();
+            int agentY = internalMap.getAgentY();
+            return internalMap.getObservations().stream().anyMatch(observation ->
+                observation.type().equals("roleZone")
+                    && observation.x() == agentX
+                    && observation.y() == agentY);
+            }
+
+                private boolean shouldInterruptForRole() {
+                if (!DEFAULT_ROLE.equals(currentRole)) {
+                    return false;
+                }
+                    if (currentIntention != null
+                            && currentIntention.desire() == Desire.CLEAR_OBSTACLE) {
+                        return false;
+                    }
+                if (isAtRoleZone()) {
+                    return currentIntention == null
+                        || currentIntention.desire() != Desire.ADAPT_ROLE;
+                }
+
+                InternalMap.Observation roleZone = findNearestRoleZone();
+                boolean roleZoneIsRelevant = roleZone != null
+                    && (explorationFinished
+                        || distanceTo(roleZone.x(), roleZone.y(), internalMap.getAgentX(), internalMap.getAgentY())
+                            <= ROLE_ZONE_MAX_DISTANCE);
+                return roleZoneIsRelevant
+                    && (currentIntention == null
+                        || currentIntention.desire() != Desire.REACH_ROLE_ZONE);
+                }
+
     private int distanceTo(int firstX, int firstY, int secondX, int secondY) {
         return Math.abs(firstX - secondX) + Math.abs(firstY - secondY);
     }
@@ -923,7 +1015,15 @@ public class BasicAgent extends Agent {
         if (currentIntention.desire() == Desire.CLEAR_OBSTACLE) {
             return executeClear();
         }
+        if (currentIntention.desire() == Desire.ADAPT_ROLE) {
+            return executeAdapt();
+        }
         return executeMove();
+    }
+
+    private Action executeAdapt() {
+        pendingAction = "adapt";
+        return new Action("adapt", new Identifier(currentIntention.plan().get(0)));
     }
 
     private Action executeMove() {
@@ -1011,6 +1111,12 @@ public class BasicAgent extends Agent {
         if (currentIntention != null
                 && currentIntention.desire() == Desire.EXPLORE
                 && explorationTargetSeen()) {
+            explorationFinished = true;
+            currentIntention = null;
+            explorationTarget = null;
+        }
+
+        if (shouldInterruptForRole()) {
             currentIntention = null;
             explorationTarget = null;
         }
