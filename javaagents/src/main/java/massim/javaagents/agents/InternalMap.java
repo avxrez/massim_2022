@@ -217,6 +217,11 @@ public class InternalMap {
         return Set.copyOf(visibleTeammates);
     }
 
+    /** Returns the positions currently occupied by visible entities. */
+    public Set<Position> getOccupiedEntityPositions() {
+        return Set.copyOf(occupiedEntityPositions);
+    }
+
     /** Liest absolute Kartenbeobachtungen aus einer Nachrichtenliste ein. */
     public void mergeObservations(Parameter parameter) {
         if (!(parameter instanceof ParameterList map)) {

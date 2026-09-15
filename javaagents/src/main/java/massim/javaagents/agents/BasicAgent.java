@@ -947,7 +947,8 @@ public class BasicAgent extends Agent {
         List<String> path = pathPlanner.findPath(
                 currentPosition(),
                 new InternalMap.Position(roleZone.x(), roleZone.y()),
-                internalMap.getBlockedPositions());
+            internalMap.getBlockedPositions(),
+            internalMap.getOccupiedEntityPositions());
         if (nextMoveIsBlocked(path)) {
             return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
         }
@@ -962,7 +963,8 @@ public class BasicAgent extends Agent {
         InternalMap.Position start = currentPosition();
         InternalMap.Position target = new InternalMap.Position(goal.x(), goal.y());
 
-        List<String> path = pathPlanner.findPath(start, target, internalMap.getBlockedPositions());
+        List<String> path = pathPlanner.findPath(start, target,
+            internalMap.getBlockedPositions(), internalMap.getOccupiedEntityPositions());
         if (nextMoveIsBlocked(path)) {
             return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
         }
@@ -1008,7 +1010,8 @@ public class BasicAgent extends Agent {
             return new Intention(Desire.WAIT, List.of(), 0);
         }
         List<String> path = pathPlanner.findCarryingPath(currentPosition(), blockPosition,
-                retrieveBlockDirection, internalMap.getBlockedPositions());
+            retrieveBlockDirection, internalMap.getBlockedPositions(),
+            internalMap.getOccupiedEntityPositions());
         if (path.isEmpty()) {
             return new Intention(Desire.WAIT, List.of(), 0);
         }
@@ -1025,7 +1028,7 @@ public class BasicAgent extends Agent {
                 continue;
             }
             List<String> path = pathPlanner.findPath(currentPosition(), candidate,
-                    internalMap.getBlockedPositions());
+                    internalMap.getBlockedPositions(), internalMap.getOccupiedEntityPositions());
             if (!path.isEmpty() && (bestPath.isEmpty() || path.size() < bestPath.size())) {
                 bestPath = path;
             }
@@ -1099,7 +1102,8 @@ public class BasicAgent extends Agent {
         InternalMap.Position target = explorationTargetSelector.selectTarget(internalMap, knownTargets, getName());
         explorationTarget = target;
 
-        List<String> path = pathPlanner.findPath(start, target, internalMap.getBlockedPositions());
+        List<String> path = pathPlanner.findPath(start, target,
+            internalMap.getBlockedPositions(), internalMap.getOccupiedEntityPositions());
         if (nextMoveIsBlocked(path)) {
             return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
         }
@@ -1184,6 +1188,39 @@ public class BasicAgent extends Agent {
                     && (currentIntention == null
                         || currentIntention.desire() != Desire.REACH_ROLE_ZONE);
                 }
+
+        /** Replans movement after every perception cycle using the current map. */
+        private void replanMovementIntention() {
+            if (currentIntention == null || currentIntention.finished()) {
+                return;
+            }
+
+            switch (currentIntention.desire()) {
+                case REACH_ROLE_ZONE -> currentIntention = createRoleZoneIntention();
+                case REACH_GOAL_ZONE -> currentIntention = createGoalIntention();
+                case RETRIEVE_BLOCK -> {
+                    if (blockRequested && !blockRetrieved) {
+                        currentIntention = createRetrieveBlockIntention();
+                    } else if (blockRetrieved) {
+                        currentIntention = createRetrieveBlockIntention();
+                    }
+                }
+                case EXPLORE -> {
+                    if (explorationTarget != null) {
+                        List<String> path = pathPlanner.findPath(
+                                currentPosition(), explorationTarget,
+                            internalMap.getBlockedPositions(),
+                            internalMap.getOccupiedEntityPositions());
+                        currentIntention = nextMoveIsBlocked(path)
+                                ? new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0)
+                                : new Intention(Desire.EXPLORE, path, 0);
+                    }
+                }
+                default -> {
+                    // State-changing actions must finish before replanning.
+                }
+            }
+        }
 
     private int distanceTo(int firstX, int firstY, int secondX, int secondY) {
         return Math.abs(firstX - secondX) + Math.abs(firstY - secondY);
@@ -1378,6 +1415,8 @@ public class BasicAgent extends Agent {
             currentIntention = null;
             explorationTarget = null;
         }
+
+        replanMovementIntention();
 
         // --------------------------------------------------------
         // 4. BDI decision cycle

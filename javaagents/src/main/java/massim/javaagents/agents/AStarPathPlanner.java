@@ -26,6 +26,9 @@ public class AStarPathPlanner {
     /** Search-area margin used for the fallback search that ignores obstacles. */
     private static final int FALLBACK_SEARCH_MARGIN = 10;
 
+    /** High cost used in the carrying fallback to avoid unnecessary rotations. */
+    private static final int CARRYING_FALLBACK_ROTATION_COST = 100;
+
     private static final Comparator<Node> BY_ESTIMATE_THEN_COST =
             Comparator.comparingInt(Node::estimate).thenComparingInt(Node::cost);
 
@@ -46,6 +49,13 @@ public class AStarPathPlanner {
     public List<String> findPath(InternalMap.Position start,
                                   InternalMap.Position goal,
                                   List<InternalMap.Position> blockedPositions) {
+        return findPath(start, goal, blockedPositions, Set.of());
+    }
+
+    public List<String> findPath(InternalMap.Position start,
+                                 InternalMap.Position goal,
+                                 List<InternalMap.Position> blockedPositions,
+                                 Set<InternalMap.Position> occupiedPositions) {
         Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
         blocked.remove(start);
 
@@ -57,7 +67,9 @@ public class AStarPathPlanner {
 
         // Kein hindernisfreier Pfad gefunden: Notfallpfad berechnen, der
         // Hindernisse ignoriert, damit der Agent trotzdem eine Richtung hat.
-        List<String> fallbackPath = search(start, goal, Set.of(), FALLBACK_SEARCH_MARGIN);
+        Set<InternalMap.Position> fallbackBlocked = new HashSet<>(occupiedPositions);
+        fallbackBlocked.remove(start);
+        List<String> fallbackPath = search(start, goal, fallbackBlocked, FALLBACK_SEARCH_MARGIN);
         return fallbackPath != null ? fallbackPath : List.of();
     }
 
@@ -66,6 +78,24 @@ public class AStarPathPlanner {
                                           InternalMap.Position goal,
                                           String blockDirection,
                                           List<InternalMap.Position> blockedPositions) {
+        return findCarryingPath(start, goal, blockDirection, blockedPositions, Set.of(), false);
+    }
+
+    public List<String> findCarryingPath(InternalMap.Position start,
+                                         InternalMap.Position goal,
+                                         String blockDirection,
+                                         List<InternalMap.Position> blockedPositions,
+                                         Set<InternalMap.Position> occupiedPositions) {
+        return findCarryingPath(start, goal, blockDirection, blockedPositions,
+                occupiedPositions, false);
+    }
+
+    private List<String> findCarryingPath(InternalMap.Position start,
+                                           InternalMap.Position goal,
+                                           String blockDirection,
+                                           List<InternalMap.Position> blockedPositions,
+                                           Set<InternalMap.Position> occupiedPositions,
+                                           boolean fallback) {
         Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
         blocked.remove(start);
         CarryState startState = new CarryState(start, blockDirection);
@@ -98,7 +128,8 @@ public class AStarPathPlanner {
                 }
                 CarryState next = new CarryState(state.position(), rotatedDirection);
                 addCarryState(open, costs, parents, actions, state, next,
-                        "rotate:" + (clockwise ? "cw" : "ccw"), 4, goal);
+                    "rotate:" + (clockwise ? "cw" : "ccw"),
+                    fallback ? CARRYING_FALLBACK_ROTATION_COST : 4, goal);
             }
 
             for (String direction : List.of("n", "e", "s", "w")) {
@@ -115,9 +146,10 @@ public class AStarPathPlanner {
                         direction, 10, goal);
             }
         }
-        if (!blocked.isEmpty()) {
+        if (!fallback && !blocked.isEmpty()) {
             // Carrying paths also need a direction when a known obstacle blocks the route.
-            return findCarryingPath(start, goal, blockDirection, List.of());
+            return findCarryingPath(start, goal, blockDirection, List.of(),
+                    occupiedPositions, true);
         }
         return List.of();
     }
