@@ -32,6 +32,10 @@ public class AStarPathPlanner {
     /** A node in the search frontier: a position plus its cost-so-far and estimated total cost. */
     private record Node(InternalMap.Position position, int cost, int estimate) {}
 
+    private record CarryState(InternalMap.Position position, String blockDirection) {}
+
+    private record CarryNode(CarryState state, int cost, int estimate) {}
+
     /**
      * Finds the shortest path from {@code start} to {@code goal}.
      *
@@ -55,6 +59,129 @@ public class AStarPathPlanner {
         // Hindernisse ignoriert, damit der Agent trotzdem eine Richtung hat.
         List<String> fallbackPath = search(start, goal, Set.of(), FALLBACK_SEARCH_MARGIN);
         return fallbackPath != null ? fallbackPath : List.of();
+    }
+
+    /** Finds a path for an agent carrying one block, including required rotations. */
+    public List<String> findCarryingPath(InternalMap.Position start,
+                                          InternalMap.Position goal,
+                                          String blockDirection,
+                                          List<InternalMap.Position> blockedPositions) {
+        Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
+        blocked.remove(start);
+        CarryState startState = new CarryState(start, blockDirection);
+        PriorityQueue<CarryNode> open = new PriorityQueue<>(
+                Comparator.comparingInt(CarryNode::estimate).thenComparingInt(CarryNode::cost));
+        Map<CarryState, Integer> costs = new HashMap<>();
+        Map<CarryState, CarryState> parents = new HashMap<>();
+        Map<CarryState, String> actions = new HashMap<>();
+        int margin = Math.min(blocked.size() + 1, MAX_SEARCH_MARGIN);
+
+        costs.put(startState, 0);
+        open.add(new CarryNode(startState, 0, heuristic(start, goal)));
+        int minX = Math.min(start.x(), goal.x()) - margin;
+        int maxX = Math.max(start.x(), goal.x()) + margin;
+        int minY = Math.min(start.y(), goal.y()) - margin;
+        int maxY = Math.max(start.y(), goal.y()) + margin;
+
+        while (!open.isEmpty()) {
+            CarryNode current = open.poll();
+            CarryState state = current.state();
+            if (state.position().equals(goal)) {
+                return reconstructCarryingPath(parents, actions, startState, state);
+            }
+
+            for (boolean clockwise : List.of(true, false)) {
+                String rotatedDirection = rotateDirection(state.blockDirection(), clockwise);
+                InternalMap.Position rotatedBlock = offsetPosition(state.position(), rotatedDirection);
+                if (blocked.contains(rotatedBlock)) {
+                    continue;
+                }
+                CarryState next = new CarryState(state.position(), rotatedDirection);
+                addCarryState(open, costs, parents, actions, state, next,
+                        "rotate:" + (clockwise ? "cw" : "ccw"), 4, goal);
+            }
+
+            for (String direction : List.of("n", "e", "s", "w")) {
+                int[] offset = directionOffset(direction);
+                InternalMap.Position nextPosition = new InternalMap.Position(
+                        state.position().x() + offset[0], state.position().y() + offset[1]);
+                InternalMap.Position nextBlockPosition = offsetPosition(nextPosition, state.blockDirection());
+                if (!insideBounds(nextPosition, minX, maxX, minY, maxY)
+                        || blocked.contains(nextPosition) || blocked.contains(nextBlockPosition)) {
+                    continue;
+                }
+                CarryState next = new CarryState(nextPosition, state.blockDirection());
+                addCarryState(open, costs, parents, actions, state, next,
+                        direction, 10, goal);
+            }
+        }
+        if (!blocked.isEmpty()) {
+            // Carrying paths also need a direction when a known obstacle blocks the route.
+            return findCarryingPath(start, goal, blockDirection, List.of());
+        }
+        return List.of();
+    }
+
+    private void addCarryState(PriorityQueue<CarryNode> open,
+                               Map<CarryState, Integer> costs,
+                               Map<CarryState, CarryState> parents,
+                               Map<CarryState, String> actions,
+                               CarryState current,
+                               CarryState next,
+                               String action,
+                               int actionCost,
+                               InternalMap.Position goal) {
+        int newCost = costs.get(current) + actionCost;
+        if (newCost < costs.getOrDefault(next, Integer.MAX_VALUE)) {
+            costs.put(next, newCost);
+            parents.put(next, current);
+            actions.put(next, action);
+            open.add(new CarryNode(next, newCost,
+                    newCost + heuristic(next.position(), goal) * 10));
+        }
+    }
+
+    private List<String> reconstructCarryingPath(Map<CarryState, CarryState> parents,
+                                                  Map<CarryState, String> actions,
+                                                  CarryState start,
+                                                  CarryState goal) {
+        List<String> path = new ArrayList<>();
+        CarryState current = goal;
+        while (!current.equals(start)) {
+            CarryState parent = parents.get(current);
+            if (parent == null) {
+                return List.of();
+            }
+            path.add(actions.get(current));
+            current = parent;
+        }
+        Collections.reverse(path);
+        return path;
+    }
+
+    private InternalMap.Position offsetPosition(InternalMap.Position position, String direction) {
+        int[] offset = directionOffset(direction);
+        return new InternalMap.Position(position.x() + offset[0], position.y() + offset[1]);
+    }
+
+    private String rotateDirection(String direction, boolean clockwise) {
+        return switch (direction) {
+            case "n" -> clockwise ? "e" : "w";
+            case "e" -> clockwise ? "s" : "n";
+            case "s" -> clockwise ? "w" : "e";
+            case "w" -> clockwise ? "n" : "s";
+            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
+        };
+    }
+
+    private int[] directionOffset(String direction) {
+        return switch (direction) {
+            case "n" -> new int[]{0, -1};
+            case "e" -> new int[]{1, 0};
+            case "s" -> new int[]{0, 1};
+            case "w" -> new int[]{-1, 0};
+            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
+        };
     }
 
     /**

@@ -31,6 +31,7 @@ public class BasicAgent extends Agent {
         EXPLORE,
         CLEAR_OBSTACLE,
         REACH_GOAL_ZONE,
+        RETRIEVE_BLOCK,
         WAIT,
         REACH_ROLE_ZONE,
         ADAPT_ROLE
@@ -94,6 +95,12 @@ public class BasicAgent extends Agent {
     // ============================================================
 
     private InternalMap.Position explorationTarget;
+    private InternalMap.Position goalPosition;
+    private String retrieveBlockDirection;
+    private boolean blockRequested;
+    private boolean blockRetrieved;
+    private boolean blockPlaced;
+    private boolean attachmentCheckPending;
     private boolean explorationFinished;
     private Intention currentIntention;
     private String pendingAction;
@@ -508,6 +515,10 @@ public class BasicAgent extends Agent {
             explorationTarget = new InternalMap.Position(
                     explorationTarget.x() + offsetX, explorationTarget.y() + offsetY);
         }
+        if (goalPosition != null) {
+            goalPosition = new InternalMap.Position(
+                    goalPosition.x() + offsetX, goalPosition.y() + offsetY);
+        }
     }
 
     /** Verschiebt die interne Karte sowie alle bekannten Positionen um den angegebenen Offset. */
@@ -719,8 +730,22 @@ public class BasicAgent extends Agent {
                 internalMap.forgetObservationsAt(
                         internalMap.getAgentX() + offset[0], internalMap.getAgentY() + offset[1]);
             }
+            if ("request".equals(lastAction)) {
+                blockRequested = true;
+            } else if ("attach".equals(lastAction)) {
+                blockRetrieved = true;
+                attachmentCheckPending = true;
+            } else if ("rotate".equals(lastAction) && retrieveBlockDirection != null) {
+                retrieveBlockDirection = rotateDirection(
+                        retrieveBlockDirection, "cw".equals(pendingDirection));
+            } else if ("move".equals(lastAction) && blockRetrieved && pendingDirection != null) {
+                retrieveBlockDirection = oppositeDirection(pendingDirection);
+            }
         } else {
-            if ("move".equals(lastAction) && pendingDirection != null) {
+            if ("rotate".equals(lastAction) && retrieveBlockDirection != null) {
+                rememberFailedRotationTarget();
+                currentIntention = createRetrieveBlockIntention();
+            } else if ("move".equals(lastAction) && pendingDirection != null) {
                 int[] offset = directionOffset(pendingDirection);
                 int blockedX = internalMap.getAgentX() + offset[0];
                 int blockedY = internalMap.getAgentY() + offset[1];
@@ -735,6 +760,49 @@ public class BasicAgent extends Agent {
         pendingAction = null;
         pendingDirection = null;
         clearDirection = null;
+    }
+
+    private void verifyCarriedBlock(List<Percept> percepts) {
+        if (!blockRetrieved || retrieveBlockDirection == null) {
+            return;
+        }
+        if (attachmentCheckPending) {
+            attachmentCheckPending = false;
+            return;
+        }
+
+        String attachedDirection = percepts.stream()
+                .filter(percept -> percept.getName().equals("attached")
+                        && percept.getParameters().size() >= 2
+                        && percept.getParameters().get(0) instanceof Numeral x
+                        && percept.getParameters().get(1) instanceof Numeral y)
+            .map(percept -> {
+                    Numeral x = (Numeral) percept.getParameters().get(0);
+                    Numeral y = (Numeral) percept.getParameters().get(1);
+                return directionFromOffset(x.getValue().intValue(), y.getValue().intValue());
+            })
+            .filter(direction -> direction != null)
+            .findFirst()
+            .orElse(null);
+
+        if (attachedDirection == null) {
+            blockRequested = false;
+            blockRetrieved = false;
+            blockPlaced = false;
+            attachmentCheckPending = false;
+            retrieveBlockDirection = null;
+            currentIntention = createRetrieveBlockIntention();
+        } else {
+            retrieveBlockDirection = attachedDirection;
+        }
+    }
+
+    private String directionFromOffset(int x, int y) {
+        if (x == 0 && y == -1) return "n";
+        if (x == 1 && y == 0) return "e";
+        if (x == 0 && y == 1) return "s";
+        if (x == -1 && y == 0) return "w";
+        return null;
     }
 
     // ============================================================
@@ -769,10 +837,17 @@ public class BasicAgent extends Agent {
                 return desires;
             }
         }
-        // Goal becomes relevant once all required dispensers are known.
-            if (!currentRole.isEmpty() && !DEFAULT_ROLE.equals(currentRole)
-                && hasObservation("goalZone") && hasAllRequiredDispensers()) {
-            desires.add(isAtGoalZone() ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
+        // The block retrieval starts after reaching the goal and knowing a b1 dispenser.
+        if (!currentRole.isEmpty() && !DEFAULT_ROLE.equals(currentRole)
+            && hasObservation("goalZone") && hasDispenser("b1")) {
+                if (isAtGoalZone() && goalPosition == null) {
+                    goalPosition = currentPosition();
+                }
+                if (goalPosition != null && !blockPlaced) {
+                    desires.add(Desire.RETRIEVE_BLOCK);
+                } else {
+                    desires.add(isAtGoalZone() ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
+                }
             return desires;
         }
 
@@ -797,6 +872,12 @@ public class BasicAgent extends Agent {
             }
         }
         return !requiredDispenserTypes.isEmpty() && dispenserTypes.containsAll(requiredDispenserTypes);
+    }
+
+    private boolean hasDispenser(String blockType) {
+        return internalMap.getObservations().stream().anyMatch(observation ->
+            observation.type().equals("dispenser")
+                && observation.details().equalsIgnoreCase(blockType));
     }
 
     private void rememberKnownAgent(String agent, InternalMap.Position position, String source) {
@@ -848,6 +929,9 @@ public class BasicAgent extends Agent {
         if (desires.contains(Desire.REACH_GOAL_ZONE)) {
             return createGoalIntention();
         }
+        if (desires.contains(Desire.RETRIEVE_BLOCK)) {
+            return createRetrieveBlockIntention();
+        }
         if (desires.contains(Desire.EXPLORE)) {
             return createExploreIntention();
         }
@@ -883,6 +967,126 @@ public class BasicAgent extends Agent {
             return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
         }
         return new Intention(Desire.REACH_GOAL_ZONE, path, 0);
+    }
+
+    private Intention createRetrieveBlockIntention() {
+        if (!blockRequested) {
+            InternalMap.Observation dispenser = findNearestDispenser("b1");
+            if (dispenser == null) {
+                return new Intention(Desire.WAIT, List.of(), 0);
+            }
+
+            InternalMap.Position dispenserPosition =
+                    new InternalMap.Position(dispenser.x(), dispenser.y());
+                String adjacentDirection = adjacentDirectionTo(dispenserPosition);
+                if (adjacentDirection != null) {
+                retrieveBlockDirection = adjacentDirection;
+                return new Intention(Desire.RETRIEVE_BLOCK,
+                    List.of("request:" + adjacentDirection), 0);
+                }
+
+            List<String> path = pathToAdjacentPosition(dispenserPosition);
+            if (!path.isEmpty()) {
+                if (nextMoveIsBlocked(path)) {
+                    return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
+                }
+                return new Intention(Desire.RETRIEVE_BLOCK, path, 0);
+            }
+            return new Intention(Desire.WAIT, List.of(), 0);
+        }
+
+        if (!blockRetrieved) {
+            return new Intention(Desire.RETRIEVE_BLOCK,
+                    List.of("attach:" + retrieveBlockDirection), 0);
+        }
+
+        int[] blockOffset = directionOffset(retrieveBlockDirection);
+        InternalMap.Position blockPosition = new InternalMap.Position(
+            goalPosition.x() - blockOffset[0], goalPosition.y() - blockOffset[1]);
+        if (currentPosition().equals(blockPosition)) {
+            blockPlaced = true;
+            return new Intention(Desire.WAIT, List.of(), 0);
+        }
+        List<String> path = pathPlanner.findCarryingPath(currentPosition(), blockPosition,
+                retrieveBlockDirection, internalMap.getBlockedPositions());
+        if (path.isEmpty()) {
+            return new Intention(Desire.WAIT, List.of(), 0);
+        }
+        return new Intention(Desire.RETRIEVE_BLOCK, path, 0);
+    }
+
+    private List<String> pathToAdjacentPosition(InternalMap.Position target) {
+        List<String> bestPath = List.of();
+        for (String direction : List.of("n", "e", "s", "w")) {
+            int[] offset = directionOffset(direction);
+            InternalMap.Position candidate = new InternalMap.Position(
+                    target.x() + offset[0], target.y() + offset[1]);
+            if (currentPosition().equals(candidate)) {
+                continue;
+            }
+            List<String> path = pathPlanner.findPath(currentPosition(), candidate,
+                    internalMap.getBlockedPositions());
+            if (!path.isEmpty() && (bestPath.isEmpty() || path.size() < bestPath.size())) {
+                bestPath = path;
+            }
+        }
+        return bestPath;
+    }
+
+    private String adjacentDirectionTo(InternalMap.Position target) {
+        int deltaX = target.x() - internalMap.getAgentX();
+        int deltaY = target.y() - internalMap.getAgentY();
+        if (Math.abs(deltaX) + Math.abs(deltaY) != 1) {
+            return null;
+        }
+        return directionTo(target, currentPosition());
+    }
+
+    private InternalMap.Observation findNearestDispenser(String blockType) {
+        return internalMap.getObservations().stream()
+                .filter(observation -> observation.type().equals("dispenser")
+                && observation.details().equalsIgnoreCase(blockType))
+                .min((first, second) -> Integer.compare(
+                        distanceTo(first.x(), first.y(), internalMap.getAgentX(), internalMap.getAgentY()),
+                        distanceTo(second.x(), second.y(), internalMap.getAgentX(), internalMap.getAgentY())))
+                .orElse(null);
+    }
+
+    private String directionTo(InternalMap.Position target, InternalMap.Position from) {
+        int x = target.x() - from.x();
+        int y = target.y() - from.y();
+        if (x == 1) return "e";
+        if (x == -1) return "w";
+        if (y == 1) return "s";
+        if (y == -1) return "n";
+        throw new IllegalArgumentException("Positions are not adjacent");
+    }
+
+    private String oppositeDirection(String direction) {
+        return switch (direction) {
+            case "n" -> "s";
+            case "e" -> "w";
+            case "s" -> "n";
+            case "w" -> "e";
+            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
+        };
+    }
+
+    private String rotateDirection(String direction, boolean clockwise) {
+        return switch (direction) {
+            case "n" -> clockwise ? "e" : "w";
+            case "e" -> clockwise ? "s" : "n";
+            case "s" -> clockwise ? "w" : "e";
+            case "w" -> clockwise ? "n" : "s";
+            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
+        };
+    }
+
+    private boolean isClockwiseTurn(String from, String to) {
+        return (from.equals("n") && to.equals("e"))
+                || (from.equals("e") && to.equals("s"))
+                || (from.equals("s") && to.equals("w"))
+                || (from.equals("w") && to.equals("n"));
     }
 
     /**
@@ -1018,6 +1222,9 @@ public class BasicAgent extends Agent {
         if (currentIntention.desire() == Desire.ADAPT_ROLE) {
             return executeAdapt();
         }
+        if (currentIntention.desire() == Desire.RETRIEVE_BLOCK) {
+            return executeRetrieveBlock();
+        }
         return executeMove();
     }
 
@@ -1039,6 +1246,55 @@ public class BasicAgent extends Agent {
         pendingAction = "move";
         pendingDirection = direction;
         return move(direction);
+    }
+
+    private Action executeRetrieveBlock() {
+        String step = currentIntention.plan().get(currentIntention.nextAction());
+        if (step.startsWith("request:") || step.startsWith("attach:")) {
+            String action = step.substring(0, step.indexOf(':'));
+            String direction = step.substring(step.indexOf(':') + 1);
+            pendingAction = action;
+            return new Action(action, new Identifier(direction));
+        }
+        if (step.startsWith("rotate:")) {
+            String direction = step.substring(step.indexOf(':') + 1);
+            if (!rotationPossible(direction)) {
+                rememberFailedRotationTarget(direction);
+                currentIntention = createRetrieveBlockIntention();
+                return skip();
+            }
+            pendingAction = "rotate";
+            pendingDirection = direction;
+            return new Action("rotate", new Identifier(direction));
+        }
+        return executeMove();
+    }
+
+    private boolean rotationPossible(String rotation) {
+        if (retrieveBlockDirection == null) {
+            return false;
+        }
+        String rotatedDirection = rotateDirection(
+                retrieveBlockDirection, "cw".equals(rotation));
+        int[] offset = directionOffset(rotatedDirection);
+        InternalMap.Position rotatedBlockPosition = new InternalMap.Position(
+                internalMap.getAgentX() + offset[0], internalMap.getAgentY() + offset[1]);
+        return !internalMap.getBlockedPositions().contains(rotatedBlockPosition);
+    }
+
+    private void rememberFailedRotationTarget() {
+        if (pendingDirection != null) {
+            rememberFailedRotationTarget(pendingDirection);
+        }
+    }
+
+    private void rememberFailedRotationTarget(String rotation) {
+        String rotatedDirection = rotateDirection(
+                retrieveBlockDirection, "cw".equals(rotation));
+        int[] offset = directionOffset(rotatedDirection);
+        internalMap.rememberFailedPath(
+                internalMap.getAgentX() + offset[0],
+                internalMap.getAgentY() + offset[1], currentStep);
     }
 
     private Action executeClear() {
@@ -1087,6 +1343,7 @@ public class BasicAgent extends Agent {
 
         System.out.println(getName() + " - Step: " + currentStep + ", Leader: " + leaderName+ ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");System.out.println((""+ " has goal zone: ") + hasObservation("goalZone") + ", has all required dispensers: " + hasAllRequiredDispensers() + ", is at goal zone: " + isAtGoalZone());
         //printKnownAgentRelations();
+        System.out.println(goalPosition);
         System.out.println(currentIntention);
         printDispenserContents();
         
@@ -1107,6 +1364,7 @@ public class BasicAgent extends Agent {
         // --------------------------------------------------------
 
         updateIntentionAfterAction(percepts);
+        verifyCarriedBlock(percepts);
 
         if (currentIntention != null
                 && currentIntention.desire() == Desire.EXPLORE
