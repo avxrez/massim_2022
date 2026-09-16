@@ -26,8 +26,15 @@ public class AStarPathPlanner {
     /** Search-area margin used for the fallback search that ignores obstacles. */
     private static final int FALLBACK_SEARCH_MARGIN = 10;
 
-    /** High cost used in the carrying fallback to avoid unnecessary rotations. */
-    private static final int CARRYING_FALLBACK_ROTATION_COST = 100;
+    /** Rotation is cheap in the carrying fallback so the agent can re-align the block easily. */
+    private static final int CARRYING_ROTATION_COST = 4;
+    private static final int CARRYING_FALLBACK_ROTATION_COST = 1;
+
+    /** Straight movement is the cheapest option; changing direction is intentionally more expensive. */
+    private static final int CARRYING_STRAIGHT_MOVE_COST = 10;
+    private static final int CARRYING_FALLBACK_MOVE_COST = 3;
+    private static final int CARRYING_DIRECTION_CHANGE_COST = 30;
+    private static final int CARRYING_FALLBACK_DIRECTION_CHANGE_COST = 12;
 
     private static final Comparator<Node> BY_ESTIMATE_THEN_COST =
             Comparator.comparingInt(Node::estimate).thenComparingInt(Node::cost);
@@ -35,7 +42,7 @@ public class AStarPathPlanner {
     /** A node in the search frontier: a position plus its cost-so-far and estimated total cost. */
     private record Node(InternalMap.Position position, int cost, int estimate) {}
 
-    private record CarryState(InternalMap.Position position, String blockDirection) {}
+    private record CarryState(InternalMap.Position position, String blockDirection, String lastMoveDirection) {}
 
     private record CarryNode(CarryState state, int cost, int estimate) {}
 
@@ -78,7 +85,7 @@ public class AStarPathPlanner {
                                           InternalMap.Position goal,
                                           String blockDirection,
                                           List<InternalMap.Position> blockedPositions) {
-        return findCarryingPath(start, goal, blockDirection, blockedPositions, Set.of(), false);
+        return findCarryingPath(start, goal, blockDirection, blockedPositions, Set.of(), true);
     }
 
     public List<String> findCarryingPath(InternalMap.Position start,
@@ -87,7 +94,7 @@ public class AStarPathPlanner {
                                          List<InternalMap.Position> blockedPositions,
                                          Set<InternalMap.Position> occupiedPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-                occupiedPositions, false);
+            occupiedPositions, true);
     }
 
     private List<String> findCarryingPath(InternalMap.Position start,
@@ -96,15 +103,17 @@ public class AStarPathPlanner {
                                            List<InternalMap.Position> blockedPositions,
                                            Set<InternalMap.Position> occupiedPositions,
                                            boolean fallback) {
-        Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
+                        Set<InternalMap.Position> blocked = fallback
+                            ? new HashSet<>() : new HashSet<>(blockedPositions);
         blocked.remove(start);
-        CarryState startState = new CarryState(start, blockDirection);
+        CarryState startState = new CarryState(start, blockDirection, null);
         PriorityQueue<CarryNode> open = new PriorityQueue<>(
                 Comparator.comparingInt(CarryNode::estimate).thenComparingInt(CarryNode::cost));
         Map<CarryState, Integer> costs = new HashMap<>();
         Map<CarryState, CarryState> parents = new HashMap<>();
         Map<CarryState, String> actions = new HashMap<>();
-        int margin = Math.min(blocked.size() + 1, MAX_SEARCH_MARGIN);
+        int margin = fallback ? FALLBACK_SEARCH_MARGIN
+            : Math.min(blocked.size() + 1, MAX_SEARCH_MARGIN);
 
         costs.put(startState, 0);
         open.add(new CarryNode(startState, 0, heuristic(start, goal)));
@@ -116,7 +125,8 @@ public class AStarPathPlanner {
         while (!open.isEmpty()) {
             CarryNode current = open.poll();
             CarryState state = current.state();
-            if (state.position().equals(goal)) {
+            InternalMap.Position blockPosition = offsetPosition(state.position(), state.blockDirection());
+            if (blockPosition.equals(goal) && isCarryGoalValid(state, blocked, occupiedPositions)) {
                 return reconstructCarryingPath(parents, actions, startState, state);
             }
 
@@ -126,10 +136,10 @@ public class AStarPathPlanner {
                 if (blocked.contains(rotatedBlock)) {
                     continue;
                 }
-                CarryState next = new CarryState(state.position(), rotatedDirection);
+                CarryState next = new CarryState(state.position(), rotatedDirection, state.lastMoveDirection());
                 addCarryState(open, costs, parents, actions, state, next,
                     "rotate:" + (clockwise ? "cw" : "ccw"),
-                    fallback ? CARRYING_FALLBACK_ROTATION_COST : 4, goal);
+                    fallback ? CARRYING_FALLBACK_ROTATION_COST : CARRYING_ROTATION_COST, goal);
             }
 
             for (String direction : List.of("n", "e", "s", "w")) {
@@ -141,17 +151,23 @@ public class AStarPathPlanner {
                         || blocked.contains(nextPosition) || blocked.contains(nextBlockPosition)) {
                     continue;
                 }
-                CarryState next = new CarryState(nextPosition, state.blockDirection());
+                CarryState next = new CarryState(nextPosition, state.blockDirection(), direction);
                 addCarryState(open, costs, parents, actions, state, next,
-                        direction, 10, goal);
+                        direction, moveCost(state.lastMoveDirection(), direction, fallback), goal);
             }
         }
         if (!fallback && !blocked.isEmpty()) {
-            // Carrying paths also need a direction when a known obstacle blocks the route.
             return findCarryingPath(start, goal, blockDirection, List.of(),
                     occupiedPositions, true);
         }
         return List.of();
+    }
+
+    private boolean isCarryGoalValid(CarryState state,
+                                    Set<InternalMap.Position> blocked,
+                                    Set<InternalMap.Position> occupiedPositions) {
+        InternalMap.Position blockPosition = offsetPosition(state.position(), state.blockDirection());
+        return !blocked.contains(blockPosition) && !occupiedPositions.contains(blockPosition);
     }
 
     private void addCarryState(PriorityQueue<CarryNode> open,
@@ -171,6 +187,15 @@ public class AStarPathPlanner {
             open.add(new CarryNode(next, newCost,
                     newCost + heuristic(next.position(), goal) * 10));
         }
+    }
+
+    private int moveCost(String previousDirection, String currentDirection, boolean fallback) {
+        int baseCost = fallback ? CARRYING_FALLBACK_MOVE_COST : CARRYING_STRAIGHT_MOVE_COST;
+        if (previousDirection == null || previousDirection.equals(currentDirection)) {
+            return baseCost;
+        }
+        return baseCost + (fallback ? CARRYING_FALLBACK_DIRECTION_CHANGE_COST
+                : CARRYING_DIRECTION_CHANGE_COST);
     }
 
     private List<String> reconstructCarryingPath(Map<CarryState, CarryState> parents,

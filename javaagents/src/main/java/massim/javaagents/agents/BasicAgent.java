@@ -574,6 +574,10 @@ public class BasicAgent extends Agent {
                 }
             }
         }
+
+        if (deactivated) {
+            resetCarriedBlockTracking();
+        }
     }
 
     private boolean isVisibleTeammateAt(int x, int y) {
@@ -742,7 +746,15 @@ public class BasicAgent extends Agent {
                 retrieveBlockDirection = oppositeDirection(pendingDirection);
             }
         } else {
-            if ("rotate".equals(lastAction) && retrieveBlockDirection != null) {
+            if ("clear".equals(lastAction)
+                    && blockRetrieved
+                    && currentIntention.desire() == Desire.RETRIEVE_BLOCK
+                    && currentIntention.nextAction() + 1 < currentIntention.plan().size()
+                    && currentIntention.plan().get(currentIntention.nextAction() + 1).startsWith("rotate:")) {
+                currentIntention = currentIntention.advance();
+            } else if ("attach".equals(lastAction) && retrieveBlockDirection != null) {
+                currentIntention = createRetrieveBlockIntention();
+            } else if ("rotate".equals(lastAction) && retrieveBlockDirection != null) {
                 rememberFailedRotationTarget();
                 currentIntention = createRetrieveBlockIntention();
             } else if ("move".equals(lastAction) && pendingDirection != null) {
@@ -750,8 +762,17 @@ public class BasicAgent extends Agent {
                 int blockedX = internalMap.getAgentX() + offset[0];
                 int blockedY = internalMap.getAgentY() + offset[1];
                 internalMap.rememberFailedPath(blockedX, blockedY, currentStep);
-                currentIntention = new Intention(
-                        Desire.CLEAR_OBSTACLE, List.of(pendingDirection), 0);
+                if (blockRetrieved && retrieveBlockDirection != null) {
+                    String mirroredSide = oppositeDirection(pendingDirection);
+                    String rotation = chooseRotationForCarryRecovery(mirroredSide);
+                    currentIntention = new Intention(
+                            Desire.RETRIEVE_BLOCK,
+                            List.of("clear:" + mirroredSide, "rotate:" + rotation, pendingDirection),
+                            0);
+                } else {
+                    currentIntention = new Intention(
+                            Desire.CLEAR_OBSTACLE, List.of(pendingDirection), 0);
+                }
             } else {
                 currentIntention = null;
             }
@@ -771,37 +792,36 @@ public class BasicAgent extends Agent {
             return;
         }
 
-        String attachedDirection = percepts.stream()
-                .filter(percept -> percept.getName().equals("attached")
-                        && percept.getParameters().size() >= 2
-                        && percept.getParameters().get(0) instanceof Numeral x
-                        && percept.getParameters().get(1) instanceof Numeral y)
-            .map(percept -> {
-                    Numeral x = (Numeral) percept.getParameters().get(0);
-                    Numeral y = (Numeral) percept.getParameters().get(1);
-                return directionFromOffset(x.getValue().intValue(), y.getValue().intValue());
-            })
-            .filter(direction -> direction != null)
-            .findFirst()
-            .orElse(null);
+        String attachedDirection = findExpectedAttachedDirection(percepts);
 
-        if (attachedDirection == null) {
-            blockRequested = false;
-            blockRetrieved = false;
-            blockPlaced = false;
-            attachmentCheckPending = false;
-            retrieveBlockDirection = null;
-            currentIntention = createRetrieveBlockIntention();
-        } else {
+        if (attachedDirection != null) {
             retrieveBlockDirection = attachedDirection;
         }
     }
 
-    private String directionFromOffset(int x, int y) {
-        if (x == 0 && y == -1) return "n";
-        if (x == 1 && y == 0) return "e";
-        if (x == 0 && y == 1) return "s";
-        if (x == -1 && y == 0) return "w";
+    private void resetCarriedBlockTracking() {
+        blockRequested = false;
+        blockRetrieved = false;
+        blockPlaced = false;
+        attachmentCheckPending = false;
+        retrieveBlockDirection = null;
+    }
+
+    private String findExpectedAttachedDirection(List<Percept> percepts) {
+        int[] expectedOffset = directionOffset(retrieveBlockDirection);
+        for (Percept percept : percepts) {
+            if (!percept.getName().equals("attached")
+                    || percept.getParameters().size() < 2
+                    || !(percept.getParameters().get(0) instanceof Numeral x)
+                    || !(percept.getParameters().get(1) instanceof Numeral y)) {
+                continue;
+            }
+
+            if (x.getValue().intValue() == expectedOffset[0]
+                    && y.getValue().intValue() == expectedOffset[1]) {
+                return retrieveBlockDirection;
+            }
+        }
         return null;
     }
 
@@ -1075,6 +1095,17 @@ public class BasicAgent extends Agent {
         };
     }
 
+    private String chooseRotationForCarryRecovery(String mirroredSide) {
+        String targetDirection = mirroredSide;
+        for (boolean clockwise : List.of(true, false)) {
+            String rotated = rotateDirection(retrieveBlockDirection, clockwise);
+            if (rotated.equals(targetDirection)) {
+                return clockwise ? "cw" : "ccw";
+            }
+        }
+        return "cw";
+    }
+
     private String rotateDirection(String direction, boolean clockwise) {
         return switch (direction) {
             case "n" -> clockwise ? "e" : "w";
@@ -1083,13 +1114,6 @@ public class BasicAgent extends Agent {
             case "w" -> clockwise ? "n" : "s";
             default -> throw new IllegalArgumentException("Invalid direction: " + direction);
         };
-    }
-
-    private boolean isClockwiseTurn(String from, String to) {
-        return (from.equals("n") && to.equals("e"))
-                || (from.equals("e") && to.equals("s"))
-                || (from.equals("s") && to.equals("w"))
-                || (from.equals("w") && to.equals("n"));
     }
 
     /**
@@ -1195,6 +1219,13 @@ public class BasicAgent extends Agent {
                 return;
             }
 
+            if (currentIntention.desire() == Desire.RETRIEVE_BLOCK
+                    && currentIntention.plan().size() > 1
+                    && currentIntention.plan().stream().anyMatch(step -> step.startsWith("clear:")
+                        || step.startsWith("rotate:"))) {
+                return;
+            }
+
             switch (currentIntention.desire()) {
                 case REACH_ROLE_ZONE -> currentIntention = createRoleZoneIntention();
                 case REACH_GOAL_ZONE -> currentIntention = createGoalIntention();
@@ -1290,13 +1321,22 @@ public class BasicAgent extends Agent {
         if (step.startsWith("request:") || step.startsWith("attach:")) {
             String action = step.substring(0, step.indexOf(':'));
             String direction = step.substring(step.indexOf(':') + 1);
+            if ("attach".equals(action) && !isVisibleRequestedBlockAt(direction)) {
+                blockRequested = false;
+                currentIntention = createRetrieveBlockIntention();
+                return skip();
+            }
             pendingAction = action;
             return new Action(action, new Identifier(direction));
         }
         if (step.startsWith("rotate:")) {
             String direction = step.substring(step.indexOf(':') + 1);
             if (!rotationPossible(direction)) {
-                rememberFailedRotationTarget(direction);
+                if (retrieveBlockDirection == null) {
+                    resetCarriedBlockTracking();
+                } else {
+                    rememberFailedRotationTarget(direction);
+                }
                 currentIntention = createRetrieveBlockIntention();
                 return skip();
             }
@@ -1304,7 +1344,23 @@ public class BasicAgent extends Agent {
             pendingDirection = direction;
             return new Action("rotate", new Identifier(direction));
         }
+        if (step.startsWith("clear:")) {
+            String direction = step.substring(step.indexOf(':') + 1);
+            pendingAction = "clear";
+            clearDirection = direction;
+            int[] offset = directionOffset(direction);
+            return new Action("clear", new Numeral(offset[0]), new Numeral(offset[1]));
+        }
         return executeMove();
+    }
+
+    private boolean isVisibleRequestedBlockAt(String direction) {
+        int[] offset = directionOffset(direction);
+        return currentVisibleThings.stream().anyMatch(thing ->
+                thing.x() == offset[0]
+                        && thing.y() == offset[1]
+                        && thing.type().equals("block")
+                        && thing.details().equalsIgnoreCase("b1"));
     }
 
     private boolean rotationPossible(String rotation) {
@@ -1326,6 +1382,9 @@ public class BasicAgent extends Agent {
     }
 
     private void rememberFailedRotationTarget(String rotation) {
+        if (retrieveBlockDirection == null) {
+            return;
+        }
         String rotatedDirection = rotateDirection(
                 retrieveBlockDirection, "cw".equals(rotation));
         int[] offset = directionOffset(rotatedDirection);
