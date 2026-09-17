@@ -4,7 +4,7 @@
     "steps" : 20000,
     "randomSeed" : 17,
     "randomFail" : 1,
-    "entities" : {"standard" : 10},
+    "entities" : {"standard" : 3},
     "clusterBounds" : [1,3],
 
     "roles" : "$(roles/standard.json)",
@@ -39,7 +39,7 @@
     "dispensers" : [20, 20],
 
     "tasks" : {
-      "size" : [2, 4],
+      "size" : [1, 3],
       "concurrent" : 3,
       "iterations" : [5, 10],
       "maxDuration" : [100, 200]

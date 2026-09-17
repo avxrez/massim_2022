@@ -110,6 +110,7 @@ public class BasicAgent extends Agent {
 
     private InternalMap.Position explorationTarget;
     private InternalMap.Position goalPosition;
+    private InternalMap.Position carriedBlockPosition;
     private String retrieveBlockDirection;
     private boolean blockRequested;
     private boolean blockRetrieved;
@@ -1115,11 +1116,6 @@ public class BasicAgent extends Agent {
             } else if ("attach".equals(lastAction)) {
                 blockRetrieved = true;
                 attachmentCheckPending = true;
-            } else if ("rotate".equals(lastAction) && retrieveBlockDirection != null) {
-                retrieveBlockDirection = rotateDirection(
-                        retrieveBlockDirection, "cw".equals(pendingDirection));
-            } else if ("move".equals(lastAction) && blockRetrieved && pendingDirection != null) {
-                retrieveBlockDirection = oppositeDirection(pendingDirection);
             }
         } else {
             if ("clear".equals(lastAction)
@@ -1163,15 +1159,14 @@ public class BasicAgent extends Agent {
         if (!blockRetrieved || retrieveBlockDirection == null) {
             return;
         }
-        if (attachmentCheckPending) {
-            attachmentCheckPending = false;
-            return;
-        }
+        attachmentCheckPending = false;
 
-        String attachedDirection = findExpectedAttachedDirection(percepts);
-
-        if (attachedDirection != null) {
-            retrieveBlockDirection = attachedDirection;
+        InternalMap.Position attachedPosition = findAttachedBlockPosition(percepts);
+        if (attachedPosition != null) {
+            carriedBlockPosition = attachedPosition;
+            retrieveBlockDirection = directionTo(
+                    attachedPosition,
+                    new InternalMap.Position(internalMap.getAgentX(), internalMap.getAgentY()));
         }
     }
 
@@ -1180,11 +1175,11 @@ public class BasicAgent extends Agent {
         blockRetrieved = false;
         blockPlaced = false;
         attachmentCheckPending = false;
+        carriedBlockPosition = null;
         retrieveBlockDirection = null;
     }
 
-    private String findExpectedAttachedDirection(List<Percept> percepts) {
-        int[] expectedOffset = directionOffset(retrieveBlockDirection);
+    private InternalMap.Position findAttachedBlockPosition(List<Percept> percepts) {
         for (Percept percept : percepts) {
             if (!percept.getName().equals("attached")
                     || percept.getParameters().size() < 2
@@ -1193,10 +1188,15 @@ public class BasicAgent extends Agent {
                 continue;
             }
 
-            if (x.getValue().intValue() == expectedOffset[0]
-                    && y.getValue().intValue() == expectedOffset[1]) {
-                return retrieveBlockDirection;
+            int relativeX = x.getValue().intValue();
+            int relativeY = y.getValue().intValue();
+            if (Math.abs(relativeX) + Math.abs(relativeY) != 1) {
+                continue;
             }
+
+            return new InternalMap.Position(
+                    internalMap.getAgentX() + relativeX,
+                    internalMap.getAgentY() + relativeY);
         }
         return null;
     }
@@ -1415,14 +1415,14 @@ public class BasicAgent extends Agent {
                     List.of("attach:" + retrieveBlockDirection), 0);
         }
 
-        int[] blockOffset = directionOffset(retrieveBlockDirection);
-        InternalMap.Position blockPosition = new InternalMap.Position(
-            goalPosition.x() - blockOffset[0], goalPosition.y() - blockOffset[1]);
-        if (currentPosition().equals(blockPosition)) {
+        if (carriedBlockPosition != null && carriedBlockPosition.equals(goalPosition)) {
             blockPlaced = true;
             return new Intention(Desire.WAIT, List.of(), 0);
         }
-        List<String> path = pathPlanner.findCarryingPath(currentPosition(), blockPosition,
+        int[] blockOffset = directionOffset(retrieveBlockDirection);
+        InternalMap.Position targetPosition = new InternalMap.Position(
+            goalPosition.x() - blockOffset[0], goalPosition.y() - blockOffset[1]);
+        List<String> path = pathPlanner.findCarryingPath(currentPosition(), targetPosition,
             retrieveBlockDirection, internalMap.getBlockedPositions(),
             internalMap.getOccupiedEntityPositions());
         if (path.isEmpty()) {
