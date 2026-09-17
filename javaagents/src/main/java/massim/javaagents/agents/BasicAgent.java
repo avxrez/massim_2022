@@ -65,11 +65,25 @@ public class BasicAgent extends Agent {
     private String leaderName = "";
     private int lastID = -1;
     private int currentStep = -1;
+    private int taskDeadline = -1;
     private int energy = -1;
     private boolean deactivated;
     private String currentRole = "";
     private String currentTask;
     private String teamName = "";
+    private final Map<String, Boolean> knownAgentGroupState = new HashMap<>();
+    private final Map<String, String> knownAgentGroupLeader = new HashMap<>();
+    private final Set<String> currentGroupMembers = new HashSet<>();
+    private final Set<String> pendingGroupInvitations = new HashSet<>();
+    private final Set<String> rejectedGroupInviteTargets = new HashSet<>();
+    private String currentGroupInviteTarget = null;
+    private boolean groupInviteRetryRequested = false;
+    private int currentTaskBlockCount = 1;
+    private int desiredGroupSize = 1;
+    private String currentGroupLeader = "";
+    private boolean groupLeaderMode = false;
+    private boolean groupFormationActive = false;
+    private String groupTaskName = "";
 
     private final Set<String> requiredDispenserTypes = new HashSet<>();
     private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
@@ -182,6 +196,7 @@ public class BasicAgent extends Agent {
                 rememberKnownAgent(sender,
                     new InternalMap.Position(
                         senderX.getValue().intValue(), senderY.getValue().intValue()), sender);
+            updateKnownAgentGroupState(sender, message);
             if (message.getParameters().size() > 6) {
                 mergeKnownAgents(message.getParameters().get(6), sender);
             }
@@ -291,6 +306,121 @@ public class BasicAgent extends Agent {
                         sendMapMerge(sender);
                         }
                         return;
+        }
+
+        if (message.getName().equals("groupInvite")
+                && message.getParameters().size() >= 3
+                && message.getParameters().get(0) instanceof Identifier leader
+                && message.getParameters().get(1) instanceof Identifier task
+                && message.getParameters().get(2) instanceof Numeral size) {
+            if (currentTask == null
+                || !currentTask.equals(task.getValue())
+                    || !isTaskActive()
+                || Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
+                || groupFormationActive) {
+                System.out.println(getName() + " declines invite from " + leader.getValue()
+                        + " because it is already in a group.");
+                sendMessage(new Percept("groupInviteRejected",
+                        new Identifier(getName())), leader.getValue(), getName());
+                return;
+            }
+
+            System.out.println(getName() + " received group invite from " + leader.getValue()
+                    + " for task " + task.getValue() + " with target size " + size.getValue().intValue());
+            currentGroupLeader = leader.getValue();
+            groupTaskName = task.getValue();
+            desiredGroupSize = size.getValue().intValue();
+            groupFormationActive = true;
+            groupLeaderMode = false;
+            knownAgentGroupState.put(getName(), true);
+            knownAgentGroupLeader.put(getName(), leader.getValue());
+            currentGroupMembers.clear();
+            currentGroupMembers.add(leader.getValue());
+            currentGroupMembers.add(getName());
+            sendMessage(new Percept("groupJoinAccepted",
+                    new Identifier(getName()),
+                    new Identifier(groupTaskName),
+                    new Numeral(desiredGroupSize)), leader.getValue(), getName());
+            System.out.println(getName() + " accepted invite and joined group of leader " + currentGroupLeader);
+            return;
+        }
+
+        if (message.getName().equals("groupInviteRejected")
+                && message.getParameters().size() >= 1
+                && message.getParameters().get(0) instanceof Identifier rejectedAgent
+                && groupLeaderMode) {
+            pendingGroupInvitations.remove(rejectedAgent.getValue());
+            currentGroupInviteTarget = null;
+            rejectedGroupInviteTargets.add(rejectedAgent.getValue());
+            System.out.println(getName() + " received rejection from " + rejectedAgent.getValue()
+                    + ". Skipping this agent for the current group and waiting for the next free agent.");
+            if (currentGroupMembers.size() < desiredGroupSize) {
+                groupInviteRetryRequested = true;
+            }
+            return;
+        }
+
+        if (message.getName().equals("groupJoinAccepted")
+                && message.getParameters().size() >= 2
+                && message.getParameters().get(0) instanceof Identifier agent
+                && message.getParameters().get(1) instanceof Identifier task
+                && groupLeaderMode) {
+            pendingGroupInvitations.remove(agent.getValue());
+            currentGroupInviteTarget = null;
+            System.out.println(getName() + " accepted agent " + agent.getValue()
+                    + " into group for task " + task.getValue()
+                    + ". Current group size: " + currentGroupMembers.size() + "/" + desiredGroupSize);
+            knownAgentGroupState.put(agent.getValue(), true);
+            knownAgentGroupLeader.put(agent.getValue(), getName());
+            currentGroupMembers.add(agent.getValue());
+            if (currentGroupMembers.size() >= desiredGroupSize) {
+                System.out.println(getName() + " group is full (" + currentGroupMembers.size() + "/" + desiredGroupSize + "), selecting next group leader if needed.");
+                recruitNextGroupLeader();
+            } else {
+                groupInviteRetryRequested = true;
+            }
+            return;
+        }
+
+        if (message.getName().equals("groupStart")
+                && message.getParameters().size() >= 2
+                && message.getParameters().get(0) instanceof Identifier task
+                && message.getParameters().get(1) instanceof Numeral size) {
+            if (currentTask != null
+                && currentTask.equals(task.getValue())
+                    && isTaskActive()
+                && !groupFormationActive
+                && !knownAgentGroupState.getOrDefault(getName(), false)) {
+                System.out.println(getName() + " received start signal for next group on task "
+                        + task.getValue() + " with target size " + size.getValue().intValue());
+                groupTaskName = task.getValue();
+                desiredGroupSize = size.getValue().intValue();
+                currentGroupLeader = getName();
+                groupLeaderMode = true;
+                groupFormationActive = true;
+                currentGroupMembers.clear();
+                currentGroupMembers.add(getName());
+                knownAgentGroupState.put(getName(), true);
+                knownAgentGroupLeader.put(getName(), getName());
+                System.out.println(getName() + " starts new group as leader for task " + groupTaskName
+                        + " (size " + desiredGroupSize + ")");
+                inviteKnownAgentsToGroup();
+            }
+            return;
+        }
+
+        if (message.getName().equals("groupDissolve")) {
+            System.out.println(getName() + " received group dissolve notice from leader " + sender);
+            pendingGroupInvitations.clear();
+            currentGroupInviteTarget = null;
+            knownAgentGroupState.put(getName(), false);
+            knownAgentGroupLeader.remove(getName());
+            currentGroupMembers.clear();
+            groupLeaderMode = false;
+            groupFormationActive = false;
+            currentGroupLeader = "";
+            groupTaskName = "";
+            return;
         }
     }
 
@@ -441,11 +571,15 @@ public class BasicAgent extends Agent {
                 continue;
             }
             InternalMap.Position position = entry.getValue();
+            boolean inGroup = Boolean.TRUE.equals(knownAgentGroupState.getOrDefault(entry.getKey(), false));
+            String groupLeader = knownAgentGroupLeader.getOrDefault(entry.getKey(), "");
             agents.add(new Function("knownAgent",
                     new Identifier(entry.getKey()),
                     new Numeral(position.x()),
                     new Numeral(position.y()),
-                    new Identifier(knownAgentSources.getOrDefault(entry.getKey(), "unknown"))));
+                    new Identifier(knownAgentSources.getOrDefault(entry.getKey(), "unknown")),
+                    new Identifier(inGroup ? "grouped" : "free"),
+                    new Identifier(groupLeader)));
         }
         return agents;
     }
@@ -466,10 +600,43 @@ public class BasicAgent extends Agent {
                 continue;
             }
 
+            boolean inGroup = false;
+            String groupLeader = "";
+            if (knownAgent.getParameters().size() >= 6
+                    && knownAgent.getParameters().get(4) instanceof Identifier groupState
+                    && knownAgent.getParameters().get(5) instanceof Identifier leaderIdentifier) {
+                inGroup = isGroupedState(groupState);
+                groupLeader = leaderIdentifier.getValue();
+            } else if (knownAgent.getParameters().size() >= 5
+                    && knownAgent.getParameters().get(4) instanceof Identifier groupState) {
+                inGroup = isGroupedState(groupState);
+            }
+
             rememberKnownAgent(agent.getValue(),
                     new InternalMap.Position(x.getValue().intValue(), y.getValue().intValue()),
-                    sender + ">" + source.getValue());
+                    sender + ">" + source.getValue(), inGroup, groupLeader);
         }
+    }
+
+    private void updateKnownAgentGroupState(String agent, Percept message) {
+        if (message.getParameters().size() < 9
+                || !(message.getParameters().get(7) instanceof Identifier groupState)
+                || !(message.getParameters().get(8) instanceof Identifier groupLeader)) {
+            return;
+        }
+
+        boolean inGroup = isGroupedState(groupState);
+        knownAgentGroupState.put(agent, inGroup);
+        if (inGroup) {
+            knownAgentGroupLeader.put(agent, groupLeader.getValue());
+        } else {
+            knownAgentGroupLeader.remove(agent);
+        }
+    }
+
+    private boolean isGroupedState(Identifier groupState) {
+        return "grouped".equalsIgnoreCase(groupState.getValue())
+                || "true".equalsIgnoreCase(groupState.getValue());
     }
 
     private ParameterList mapParameters() {
@@ -548,6 +715,7 @@ public class BasicAgent extends Agent {
      */
     private void updateBeliefs(List<Percept> percepts) {
         requiredDispenserTypes.clear();
+        boolean taskPerceptReceived = false;
 
         for (Percept percept : percepts) {
             if (percept.getParameters().isEmpty()) {
@@ -566,13 +734,25 @@ public class BasicAgent extends Agent {
                 case "team" -> teamName = identifierValue(percept, teamName);
                 case "deactivated" -> deactivated = identifierValue(percept, "false").equals("true");
                 case "task" -> {
+                    taskPerceptReceived = true;
                     currentTask = identifierValue(percept, currentTask);
+                    if (percept.getParameters().size() > 1
+                            && percept.getParameters().get(1) instanceof Numeral deadline) {
+                        taskDeadline = deadline.getValue().intValue();
+                    }
                     rememberTaskRequirements(percept);
                 }
                 default -> {
                     // Not a scalar belief.
                 }
             }
+        }
+
+        if (!taskPerceptReceived) {
+            currentTask = null;
+            taskDeadline = -1;
+            currentTaskBlockCount = 1;
+            desiredGroupSize = 1;
         }
 
         if (deactivated) {
@@ -633,7 +813,10 @@ public class BasicAgent extends Agent {
                     new Numeral(target == null ? Integer.MIN_VALUE : target.y()),
                     content,
                     new Identifier(leaderName),
-                    knownAgentsParameters()), agent, getName());
+                        knownAgentsParameters(),
+                        new Identifier(Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
+                            ? "grouped" : "free"),
+                        new Identifier(knownAgentGroupLeader.getOrDefault(getName(), ""))), agent, getName());
         }
     }
 
@@ -651,7 +834,10 @@ public class BasicAgent extends Agent {
                     new Numeral(target == null ? Integer.MIN_VALUE : target.y()),
                     mapParameters(),
                     new Identifier(leaderName),
-                    knownAgentsParameters()), agent, getName());
+                        knownAgentsParameters(),
+                        new Identifier(Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
+                            ? "grouped" : "free"),
+                        new Identifier(knownAgentGroupLeader.getOrDefault(getName(), ""))), agent, getName());
         }
     }
 
@@ -664,13 +850,203 @@ public class BasicAgent extends Agent {
             return;
         }
 
+        requiredDispenserTypes.clear();
+        currentTaskBlockCount = 0;
         for (Parameter requirement : requirements) {
             if (requirement instanceof Function function
                     && function.getParameters().size() >= 3
                     && function.getParameters().get(2) instanceof Identifier type) {
                 requiredDispenserTypes.add(type.getValue());
+                currentTaskBlockCount++;
             }
         }
+        if (currentTaskBlockCount <= 0) {
+            currentTaskBlockCount = 1;
+        }
+        desiredGroupSize = calculateDesiredGroupSize();
+    }
+
+    private int calculateDesiredGroupSize() {
+        return Math.max(1, currentTaskBlockCount);
+    }
+
+    private boolean isTaskActive() {
+        return taskDeadline < 0 || currentStep < taskDeadline;
+    }
+
+    private void startGroupFormation() {
+        if (!leaderName.equals(getName())
+                || groupFormationActive
+                || !explorationFinished
+                || currentTask == null
+                || currentTask.isEmpty()
+                || !isTaskActive()) {
+            return;
+        }
+
+        pendingGroupInvitations.clear();
+        rejectedGroupInviteTargets.clear();
+        currentGroupInviteTarget = null;
+        System.out.println(getName() + " starts group formation after exploration for task " + currentTask
+                + " with desired size " + calculateDesiredGroupSize());
+        desiredGroupSize = calculateDesiredGroupSize();
+        groupTaskName = currentTask;
+        groupLeaderMode = true;
+        groupFormationActive = true;
+        currentGroupLeader = getName();
+        currentGroupMembers.clear();
+        currentGroupMembers.add(getName());
+        knownAgentGroupState.put(getName(), true);
+        knownAgentGroupLeader.put(getName(), getName());
+        inviteKnownAgentsToGroup();
+    }
+
+    private void inviteKnownAgentsToGroup() {
+        if (!groupLeaderMode || !groupFormationActive) {
+            return;
+        }
+        if (currentGroupMembers.size() >= desiredGroupSize) {
+            return;
+        }
+        if (!pendingGroupInvitations.isEmpty() || currentGroupInviteTarget != null) {
+            return;
+        }
+
+        for (String agent : knownAgents.keySet()) {
+            if (agent.equals(getName())
+                    || Boolean.TRUE.equals(knownAgentGroupState.get(agent))
+                    || rejectedGroupInviteTargets.contains(agent)) {
+                continue;
+            }
+            currentGroupInviteTarget = agent;
+            pendingGroupInvitations.add(agent);
+            System.out.println(getName() + " invites " + agent + " to group for task " + groupTaskName
+                    + " (current members: " + currentGroupMembers.size() + "/" + desiredGroupSize + ")");
+            sendMessage(new Percept("groupInvite",
+                    new Identifier(getName()),
+                    new Identifier(groupTaskName),
+                    new Numeral(desiredGroupSize)), agent, getName());
+            return;
+        }
+            System.out.println(getName() + " found no free known agent for group task " + groupTaskName
+                + " (known agents: " + knownAgents.keySet() + ")");
+    }
+
+    private void recruitNextGroupLeader() {
+        if (!groupLeaderMode || !groupFormationActive || currentGroupMembers.size() < desiredGroupSize) {
+            return;
+        }
+
+        System.out.println(getName() + " attempts to start the next group after reaching full size "
+                + currentGroupMembers.size() + "/" + desiredGroupSize);
+        for (String agent : knownAgents.keySet()) {
+            if (agent.equals(getName())
+                    || currentGroupMembers.contains(agent)
+                    || Boolean.TRUE.equals(knownAgentGroupState.get(agent))
+                    || rejectedGroupInviteTargets.contains(agent)) {
+                continue;
+            }
+            System.out.println(getName() + " appoints " + agent + " as next group leader for task " + groupTaskName);
+            knownAgentGroupState.put(agent, true);
+            knownAgentGroupLeader.put(agent, agent);
+            sendMessage(new Percept("groupStart",
+                    new Identifier(groupTaskName),
+                    new Numeral(desiredGroupSize)), agent, getName());
+                    groupFormationActive = false;
+                    groupLeaderMode = false;
+                    currentGroupLeader = "";
+            return;
+        }
+        System.out.println(getName() + " has no free known agent left for a new group.");
+    }
+
+    private void dissolveCurrentGroup() {
+        if (!groupLeaderMode || !groupFormationActive) {
+            return;
+        }
+
+        System.out.println(getName() + " dissolves current group for task " + groupTaskName
+                + " because the task changed or the group is no longer required.");
+        for (String member : new ArrayList<>(currentGroupMembers)) {
+            sendMessage(new Percept("groupDissolve"), member, getName());
+            knownAgentGroupState.put(member, false);
+            knownAgentGroupLeader.remove(member);
+        }
+        currentGroupMembers.clear();
+        pendingGroupInvitations.clear();
+        rejectedGroupInviteTargets.clear();
+        currentGroupInviteTarget = null;
+        groupInviteRetryRequested = false;
+        groupLeaderMode = false;
+        groupFormationActive = false;
+        currentGroupLeader = "";
+        groupTaskName = "";
+    }
+
+    private void updateGroupState() {
+        resetGroupStateAfterTaskChange();
+
+        if (leaderName.equals(getName())
+                && !groupFormationActive
+                && explorationFinished
+                && currentTask != null
+            && !currentTask.isEmpty()
+            && isTaskActive()) {
+            startGroupFormation();
+        }
+
+        if (groupLeaderMode && groupFormationActive && groupInviteRetryRequested
+                && currentGroupMembers.size() < desiredGroupSize
+                && currentGroupInviteTarget == null
+                && pendingGroupInvitations.isEmpty()) {
+            groupInviteRetryRequested = false;
+            inviteKnownAgentsToGroup();
+        }
+
+        if (groupLeaderMode && groupFormationActive) {
+            if (!isTaskActive() || currentTask == null || currentTask.isEmpty()
+                    || !currentTask.equals(groupTaskName)) {
+                dissolveCurrentGroup();
+            } else if (currentGroupMembers.size() >= desiredGroupSize) {
+                recruitNextGroupLeader();
+                groupFormationActive = false;
+                groupLeaderMode = false;
+                currentGroupLeader = "";
+            }
+        }
+    }
+
+    private void resetGroupStateAfterTaskChange() {
+        if (!groupFormationActive) {
+            return;
+        }
+        if (currentTask != null
+                && !currentTask.isEmpty()
+                && currentTask.equals(groupTaskName)) {
+            return;
+        }
+
+        if (groupLeaderMode) {
+            dissolveCurrentGroup();
+        } else {
+            System.out.println(getName() + " leaves old group " + groupTaskName
+                    + " because the task is no longer active.");
+            knownAgentGroupState.put(getName(), false);
+            knownAgentGroupLeader.remove(getName());
+            currentGroupMembers.clear();
+            pendingGroupInvitations.clear();
+            currentGroupInviteTarget = null;
+            groupInviteRetryRequested = false;
+            groupFormationActive = false;
+            currentGroupLeader = "";
+            groupTaskName = "";
+        }
+
+        for (String agent : knownAgents.keySet()) {
+            knownAgentGroupState.put(agent, false);
+            knownAgentGroupLeader.remove(agent);
+        }
+        rejectedGroupInviteTargets.clear();
     }
 
     private int numberValue(Percept percept, int fallback) {
@@ -903,6 +1279,23 @@ public class BasicAgent extends Agent {
     private void rememberKnownAgent(String agent, InternalMap.Position position, String source) {
         knownAgents.put(agent, position);
         knownAgentSources.put(agent, source);
+        knownAgentGroupState.putIfAbsent(agent, false);
+        knownAgentGroupLeader.putIfAbsent(agent, "");
+    }
+
+    private void rememberKnownAgent(String agent, InternalMap.Position position, String source,
+            boolean inGroup, String groupLeader) {
+        knownAgents.put(agent, position);
+        knownAgentSources.put(agent, source);
+        boolean alreadyGrouped = Boolean.TRUE.equals(knownAgentGroupState.get(agent));
+        if (!alreadyGrouped || inGroup) {
+            knownAgentGroupState.put(agent, inGroup);
+            if (inGroup && groupLeader != null && !groupLeader.isEmpty()) {
+                knownAgentGroupLeader.put(agent, groupLeader);
+            } else {
+                knownAgentGroupLeader.put(agent, "");
+            }
+        }
     }
 
     private void printDispenserContents() {
@@ -1141,6 +1534,12 @@ public class BasicAgent extends Agent {
     private boolean explorationTargetSeen() {
         return explorationTarget != null
                 && internalMap.isKnownPosition(explorationTarget.x(), explorationTarget.y());
+    }
+
+    private boolean allExplorationRequirementsKnown() {
+        return hasObservation("roleZone")
+                && hasObservation("goalZone")
+                && hasAllRequiredDispensers();
     }
 
     private boolean nextMoveIsBlocked(List<String> plan) {
@@ -1421,6 +1820,34 @@ public class BasicAgent extends Agent {
         };
     }
 
+    private void printGroupState() {
+        StringBuilder knownStates = new StringBuilder();
+        for (String agent : knownAgents.keySet()) {
+            if (knownStates.length() > 0) {
+                knownStates.append(", ");
+            }
+            knownStates.append(agent)
+                    .append("=")
+                    .append(Boolean.TRUE.equals(knownAgentGroupState.get(agent)) ? "grouped" : "free")
+                    .append("/")
+                    .append(knownAgentGroupLeader.getOrDefault(agent, "-"));
+        }
+
+        System.out.println(getName() + " GROUP STATE: task=" + currentTask
+                + ", deadline=" + taskDeadline
+                + ", active=" + isTaskActive()
+                + ", groupTask=" + groupTaskName
+                + ", groupLeader=" + currentGroupLeader
+                + ", leaderMode=" + groupLeaderMode
+                + ", formationActive=" + groupFormationActive
+                + ", members=" + currentGroupMembers
+                + ", size=" + currentGroupMembers.size() + "/" + desiredGroupSize
+                + ", inviteTarget=" + currentGroupInviteTarget
+                + ", pendingInvites=" + pendingGroupInvitations
+                + ", retryRequested=" + groupInviteRetryRequested);
+        System.out.println(getName() + " KNOWN GROUP STATES: [" + knownStates + "]");
+    }
+
     // ============================================================
     // BDI CYCLE
     // ============================================================
@@ -1438,10 +1865,11 @@ public class BasicAgent extends Agent {
         }
 
         System.out.println(getName() + " - Step: " + currentStep + ", Leader: " + leaderName+ ", Position: (" + internalMap.getAgentX() + ", " + internalMap.getAgentY() + ")");System.out.println((""+ " has goal zone: ") + hasObservation("goalZone") + ", has all required dispensers: " + hasAllRequiredDispensers() + ", is at goal zone: " + isAtGoalZone());
+        
         //printKnownAgentRelations();
-        System.out.println(goalPosition);
-        System.out.println(currentIntention);
-        printDispenserContents();
+        //System.out.println(goalPosition);
+        //System.out.println(currentIntention);
+        //printDispenserContents();
         
 
         // --------------------------------------------------------
@@ -1462,13 +1890,16 @@ public class BasicAgent extends Agent {
         updateIntentionAfterAction(percepts);
         verifyCarriedBlock(percepts);
 
-        if (currentIntention != null
-                && currentIntention.desire() == Desire.EXPLORE
-                && explorationTargetSeen()) {
+        if (!explorationFinished && allExplorationRequirementsKnown()) {
             explorationFinished = true;
-            currentIntention = null;
-            explorationTarget = null;
+            if (currentIntention != null && currentIntention.desire() == Desire.EXPLORE) {
+                currentIntention = null;
+                explorationTarget = null;
+            }
         }
+
+        updateGroupState();
+        printGroupState();
 
         if (shouldInterruptForRole()) {
             currentIntention = null;
