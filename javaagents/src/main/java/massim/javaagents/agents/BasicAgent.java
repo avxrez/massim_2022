@@ -396,7 +396,8 @@ public class BasicAgent extends Agent {
                 && currentTask.equals(task.getValue())
                     && isTaskActive()
                 && !groupFormationActive
-                && !knownAgentGroupState.getOrDefault(getName(), false)) {
+                && (!knownAgentGroupState.getOrDefault(getName(), false)
+                    || currentGroupLeader.equals(sender))) {
                 System.out.println(getName() + " received start signal for next group on task "
                         + task.getValue() + " with target size " + size.getValue().intValue());
                 groupTaskName = task.getValue();
@@ -1062,8 +1063,6 @@ public class BasicAgent extends Agent {
                 continue;
             }
             System.out.println(getName() + " appoints " + agent + " as next group leader for task " + groupTaskName);
-            knownAgentGroupState.put(agent, true);
-            knownAgentGroupLeader.put(agent, agent);
             sendMessage(new Percept("groupStart",
                     new Identifier(groupTaskName),
                     new Numeral(desiredGroupSize)), agent, getName());
