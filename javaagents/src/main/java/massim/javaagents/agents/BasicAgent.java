@@ -431,6 +431,46 @@ public class BasicAgent extends Agent {
             return;
         }
 
+        if (message.getName().equals("newRetrieveBlockLocation")
+                && message.getParameters().size() >= 3
+                && message.getParameters().get(0) instanceof Identifier blockType
+                && message.getParameters().get(1) instanceof Numeral targetX
+                && message.getParameters().get(2) instanceof Numeral targetY) {
+            if (deliveryBlockType == null
+                    || deliveryBlockType.equalsIgnoreCase(blockType.getValue())) {
+                deliveryBlockType = blockType.getValue();
+                goalPosition = new InternalMap.Position(
+                        targetX.getValue().intValue(), targetY.getValue().intValue());
+                blockPlaced = false;
+                currentIntention = null;
+                System.out.println(getName() + " updated retrieve-block target to ("
+                        + goalPosition.x() + ", " + goalPosition.y() + ")");
+            }
+            return;
+        }
+
+        if (message.getName().equals("retrieveBlockLocationUnavailable")
+                && leaderName.equals(getName())
+                && (groupLeaderMode || currentGroupLeader.equals(getName()))) {
+            if (message.getParameters().size() >= 3
+                    && message.getParameters().get(0) instanceof Identifier blockType
+                    && message.getParameters().get(1) instanceof Numeral targetX
+                    && message.getParameters().get(2) instanceof Numeral targetY
+                    && deliveryBlockType != null
+                    && deliveryBlockType.equalsIgnoreCase(blockType.getValue())) {
+                goalPosition = new InternalMap.Position(
+                        targetX.getValue().intValue(), targetY.getValue().intValue());
+                currentIntention = null;
+                notifyGroupOfNewRetrieveBlockLocation();
+            } else {
+                if (goalPosition != null) {
+                    internalMap.forgetGoalZone(goalPosition);
+                }
+                refreshGroupGoalLocation();
+            }
+            return;
+        }
+
         if (message.getName().equals("groupDissolve")) {
             System.out.println(getName() + " received group dissolve notice from leader " + sender);
             resetRetrieveAssignment();
@@ -443,6 +483,7 @@ public class BasicAgent extends Agent {
             groupFormationActive = false;
             currentGroupLeader = "";
             groupTaskName = "";
+            explorationFinished = false;
             return;
         }
 
@@ -1039,6 +1080,10 @@ public class BasicAgent extends Agent {
         members.sort(String::compareTo);
 
         InternalMap.Observation goalZone = findNearestGoalZone();
+        if (goalZone == null) {
+            dissolveGroupAndResumeExploration();
+            return;
+        }
 
         for (int index = 0; index < members.size() && index < taskBlockTypes.size(); index++) {
             String member = members.get(index);
@@ -1050,6 +1095,80 @@ public class BasicAgent extends Agent {
             System.out.println(getName() + " assigns " + blockType + " to " + member
                 + " with delivery target (" + goalZone.x() + ", " + goalZone.y() + ")");
         }
+    }
+
+    private void refreshGroupGoalLocation() {
+        if (deliveryBlockType == null || goalPosition == null
+                || isKnownGoalZone(goalPosition)) {
+            return;
+        }
+
+        InternalMap.Observation replacement = findNearestGoalZone();
+        if (replacement == null) {
+            if (leaderName.equals(getName())) {
+                dissolveGroupAndResumeExploration();
+            } else if (!currentGroupLeader.isEmpty()) {
+                sendMessage(new Percept("retrieveBlockLocationUnavailable"),
+                        currentGroupLeader, getName());
+            }
+            return;
+        }
+
+        goalPosition = new InternalMap.Position(replacement.x(), replacement.y());
+        currentIntention = null;
+        if (leaderName.equals(getName())) {
+            notifyGroupOfNewRetrieveBlockLocation();
+        } else if (!currentGroupLeader.isEmpty()) {
+            sendMessage(new Percept("retrieveBlockLocationUnavailable",
+                        new Identifier(deliveryBlockType),
+                        new Numeral(goalPosition.x()),
+                        new Numeral(goalPosition.y())),
+                    currentGroupLeader, getName());
+        }
+    }
+
+    private boolean isKnownGoalZone(InternalMap.Position position) {
+        return internalMap.getObservations().stream().anyMatch(observation ->
+                observation.type().equals("goalZone")
+                        && observation.x() == position.x()
+                        && observation.y() == position.y());
+    }
+
+    private void notifyGroupOfNewRetrieveBlockLocation() {
+        if (deliveryBlockType == null || goalPosition == null) {
+            return;
+        }
+        Set<String> recipients = new HashSet<>(currentGroupMembers);
+        for (Map.Entry<String, String> entry : knownAgentGroupLeader.entrySet()) {
+            if (getName().equals(entry.getValue())) {
+                recipients.add(entry.getKey());
+            }
+        }
+        for (String member : recipients) {
+            if (!member.equals(getName())) {
+                sendMessage(new Percept("newRetrieveBlockLocation",
+                        new Identifier(deliveryBlockType),
+                        new Numeral(goalPosition.x()),
+                        new Numeral(goalPosition.y())), member, getName());
+            }
+        }
+    }
+
+    private void dissolveGroupAndResumeExploration() {
+        Set<String> members = new HashSet<>(currentGroupMembers);
+        for (Map.Entry<String, String> entry : knownAgentGroupLeader.entrySet()) {
+            if (getName().equals(entry.getValue())) {
+                members.add(entry.getKey());
+            }
+        }
+        for (String member : members) {
+            if (!member.equals(getName())) {
+                sendMessage(new Percept("groupDissolve"), member, getName());
+            }
+        }
+        resetGroupStateForNewTask();
+        explorationFinished = false;
+        resetRetrieveAssignment();
     }
 
     private void dissolveCurrentGroup() {
@@ -1748,7 +1867,7 @@ public class BasicAgent extends Agent {
                 .min((first, second) -> Integer.compare(
                         distanceTo(first.x(), first.y(), agentX, agentY),
                         distanceTo(second.x(), second.y(), agentX, agentY)))
-                .orElseThrow();
+                .orElse(null);
     }
 
             private InternalMap.Observation findNearestRoleZone() {
@@ -2073,6 +2192,7 @@ public class BasicAgent extends Agent {
         updateBeliefs(percepts);
         internalMap.updateFromPercepts(percepts, teamName);
         updateCurrentVisibleThings(percepts);
+        refreshGroupGoalLocation();
         processTeammateRequests();
         exchangeTeammateNames();
 

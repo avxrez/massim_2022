@@ -142,6 +142,10 @@ public class InternalMap {
         occupiedEntityPositions.clear();
     }
 
+    public void forgetGoalZone(Position position) {
+        removeObservationTypeAt(position.x(), position.y(), "goalZone");
+    }
+
     public void rememberOccupiedEntity(int relativeX, int relativeY) {
         occupiedEntityPositions.add(new Position(agentX + relativeX, agentY + relativeY));
     }

@@ -27,7 +27,7 @@
       "goals": {
         "number" : 10,
         "size" : [1,5],
-        "moveProbability": 0
+        "moveProbability": 0.5
       },
       "roleZones" : {
         "number" : 5,
