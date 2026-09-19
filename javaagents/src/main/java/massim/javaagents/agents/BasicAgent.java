@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -85,6 +86,7 @@ public class BasicAgent extends Agent {
     private boolean groupFormationActive = false;
     private String groupTaskName = "";
     private String deliveryBlockType = null;
+    private InternalMap.Position requiredBlockOffset;
 
     private final Set<String> requiredDispenserTypes = new HashSet<>();
     private final List<String> taskBlockTypes = new ArrayList<>();
@@ -422,6 +424,7 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(2) instanceof Numeral targetY) {
             deliveryBlockType = blockType.getValue();
             goalPosition = new InternalMap.Position(targetX.getValue().intValue(), targetY.getValue().intValue());
+            prepareForBlockAssignment();
             System.out.println(getName() + " received custom group block task: fetch " + deliveryBlockType
                     + " and deliver it to absolute target (" + goalPosition.x() + ", " + goalPosition.y() + ")");
             currentIntention = null;
@@ -442,6 +445,7 @@ public class BasicAgent extends Agent {
             groupTaskName = "";
             return;
         }
+
     }
 
     private void processTeammateRequests() {
@@ -736,6 +740,7 @@ public class BasicAgent extends Agent {
     private void updateBeliefs(List<Percept> percepts) {
         requiredDispenserTypes.clear();
         boolean taskPerceptReceived = false;
+        String previousTask = currentTask;
 
         for (Percept percept : percepts) {
             if (percept.getParameters().isEmpty()) {
@@ -773,6 +778,22 @@ public class BasicAgent extends Agent {
             taskDeadline = -1;
             currentTaskBlockCount = 1;
             desiredGroupSize = 1;
+            requiredBlockOffset = null;
+            deliveryBlockType = null;
+            goalPosition = null;
+            currentIntention = null;
+            resetCarriedBlockTracking();
+        } else if (!Objects.equals(currentTask, previousTask)) {
+            resetGroupStateForNewTask();
+            deliveryBlockType = null;
+            goalPosition = null;
+            currentIntention = null;
+            resetRetrieveAssignment();
+        } else if (!isTaskActive()) {
+            deliveryBlockType = null;
+            goalPosition = null;
+            currentIntention = null;
+            resetRetrieveAssignment();
         }
 
         if (deactivated) {
@@ -873,12 +894,19 @@ public class BasicAgent extends Agent {
         requiredDispenserTypes.clear();
         taskBlockTypes.clear();
         currentTaskBlockCount = 0;
+        requiredBlockOffset = null;
         for (Parameter requirement : requirements) {
             if (requirement instanceof Function function
                     && function.getParameters().size() >= 3
+                    && function.getParameters().get(0) instanceof Numeral requiredX
+                    && function.getParameters().get(1) instanceof Numeral requiredY
                     && function.getParameters().get(2) instanceof Identifier type) {
                 requiredDispenserTypes.add(type.getValue());
                 taskBlockTypes.add(type.getValue());
+                if (currentTaskBlockCount == 0) {
+                    requiredBlockOffset = new InternalMap.Position(
+                            requiredX.getValue().intValue(), requiredY.getValue().intValue());
+                }
                 currentTaskBlockCount++;
             }
         }
@@ -893,7 +921,29 @@ public class BasicAgent extends Agent {
     }
 
     private boolean isTaskActive() {
-        return taskDeadline < 0 || currentStep < taskDeadline;
+        return taskDeadline < 0 || currentStep <= taskDeadline;
+    }
+
+    private void resetGroupStateForNewTask() {
+        for (String member : new ArrayList<>(currentGroupMembers)) {
+            if (!member.equals(getName())) {
+                sendMessage(new Percept("groupDissolve"), member, getName());
+            }
+        }
+        for (String agent : knownAgents.keySet()) {
+            knownAgentGroupState.put(agent, false);
+            knownAgentGroupLeader.remove(agent);
+        }
+        knownAgentGroupState.put(getName(), false);
+        knownAgentGroupLeader.remove(getName());
+        currentGroupMembers.clear();
+        pendingGroupInvitations.clear();
+        currentGroupInviteTarget = null;
+        groupInviteRetryRequested = false;
+        groupLeaderMode = false;
+        groupFormationActive = false;
+        currentGroupLeader = "";
+        groupTaskName = "";
     }
 
     private void startGroupFormation() {
@@ -988,15 +1038,17 @@ public class BasicAgent extends Agent {
         List<String> members = new ArrayList<>(currentGroupMembers);
         members.sort(String::compareTo);
 
+        InternalMap.Observation goalZone = findNearestGoalZone();
+
         for (int index = 0; index < members.size() && index < taskBlockTypes.size(); index++) {
             String member = members.get(index);
             String blockType = taskBlockTypes.get(index);
             sendMessage(new Percept("groupBlockTask",
                     new Identifier(blockType),
-                    new Numeral(0),
-                    new Numeral(0)), member, getName());
+                new Numeral(goalZone.x()),
+                new Numeral(goalZone.y())), member, getName());
             System.out.println(getName() + " assigns " + blockType + " to " + member
-                    + " with delivery target (0, 0)");
+                + " with delivery target (" + goalZone.x() + ", " + goalZone.y() + ")");
         }
     }
 
@@ -1045,6 +1097,8 @@ public class BasicAgent extends Agent {
                 && explorationFinished
                 && currentTask != null
             && !currentTask.isEmpty()
+            && deliveryBlockType == null
+            && !Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
             && isTaskActive()) {
             startGroupFormation();
         }
@@ -1065,7 +1119,7 @@ public class BasicAgent extends Agent {
                 recruitNextGroupLeader();
                 groupFormationActive = false;
                 groupLeaderMode = false;
-                currentGroupLeader = "";
+                currentGroupLeader = getName();
             }
         }
     }
@@ -1173,6 +1227,13 @@ public class BasicAgent extends Agent {
                 attachmentCheckPending = true;
             } else if ("detach".equals(lastAction)) {
                 resetCarriedBlockTracking();
+            } else if ("submit".equals(lastAction)) {
+                if (currentTaskBlockCount == 1 && isTaskActive()) {
+                    resetCarriedBlockTracking();
+                    currentIntention = null;
+                } else {
+                    blockPlaced = true;
+                }
             }
         } else {
             if ("clear".equals(lastAction)
@@ -1219,12 +1280,15 @@ public class BasicAgent extends Agent {
         attachmentCheckPending = false;
 
         InternalMap.Position attachedPosition = findAttachedBlockPosition(percepts);
-        if (attachedPosition != null) {
-            carriedBlockPosition = attachedPosition;
-            retrieveBlockDirection = directionTo(
-                    attachedPosition,
-                    new InternalMap.Position(internalMap.getAgentX(), internalMap.getAgentY()));
+        if (attachedPosition == null) {
+            resetCarriedBlockTracking();
+            return;
         }
+
+        carriedBlockPosition = attachedPosition;
+        retrieveBlockDirection = directionTo(
+                attachedPosition,
+                new InternalMap.Position(internalMap.getAgentX(), internalMap.getAgentY()));
     }
 
     private void resetCarriedBlockTracking() {
@@ -1235,6 +1299,15 @@ public class BasicAgent extends Agent {
         attachmentCheckPending = false;
         carriedBlockPosition = null;
         retrieveBlockDirection = null;
+    }
+
+    private void prepareForBlockAssignment() {
+        blockPlaced = false;
+        currentIntention = null;
+        blockRequested = blockRetrieved
+                && carriedBlockType != null
+                && deliveryBlockType != null
+                && carriedBlockType.equalsIgnoreCase(deliveryBlockType);
     }
 
     private InternalMap.Position findAttachedBlockPosition(List<Percept> percepts) {
@@ -1277,6 +1350,10 @@ public class BasicAgent extends Agent {
             desires.add(Desire.WAIT);
             return desires;
         }
+        if (currentTask != null && !isTaskActive()) {
+            desires.add(Desire.EXPLORE);
+            return desires;
+        }
         if (DEFAULT_ROLE.equals(currentRole)) {
             if (isAtRoleZone()) {
                 desires.add(Desire.ADAPT_ROLE);
@@ -1293,12 +1370,19 @@ public class BasicAgent extends Agent {
         }
 
         if (!currentRole.isEmpty() && !DEFAULT_ROLE.equals(currentRole)
-                && goalPosition != null && deliveryBlockType != null) {
+            && isTaskActive()
+            && goalPosition != null && deliveryBlockType != null) {
             if (!blockPlaced) {
                 desires.add(Desire.RETRIEVE_BLOCK);
                 return desires;
             }
             desires.add(isAtGoalZone() ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
+            return desires;
+        }
+
+        if (currentTask != null && isTaskActive() && explorationFinished
+                && Boolean.TRUE.equals(knownAgentGroupState.get(getName()))) {
+            desires.add(Desire.WAIT);
             return desires;
         }
 
@@ -1483,6 +1567,26 @@ public class BasicAgent extends Agent {
                     List.of("attach:" + retrieveBlockDirection), 0);
         }
 
+        if (currentTaskBlockCount == 1) {
+            String requiredDirection = requiredBlockDirection();
+            if (requiredDirection == null) {
+                return new Intention(Desire.WAIT, List.of(), 0);
+            }
+                if (isAtGoalZone()
+                    && requiredDirection.equals(retrieveBlockDirection)) {
+                return new Intention(Desire.RETRIEVE_BLOCK,
+                        List.of("submit:" + currentTask), 0);
+            }
+
+            List<String> path = pathPlanner.findCarryingPathToAgentPosition(currentPosition(), deliveryTarget,
+                    retrieveBlockDirection, requiredDirection, internalMap.getBlockedPositions(),
+                    internalMap.getOccupiedEntityPositions());
+            if (path.isEmpty()) {
+                return new Intention(Desire.WAIT, List.of(), 0);
+            }
+            return new Intention(Desire.RETRIEVE_BLOCK, path, 0);
+        }
+
         if (deliveryTarget != null && carriedBlockPosition != null && carriedBlockPosition.equals(deliveryTarget)) {
             blockPlaced = true;
             return new Intention(Desire.WAIT, List.of(), 0);
@@ -1497,6 +1601,17 @@ public class BasicAgent extends Agent {
             return new Intention(Desire.WAIT, List.of(), 0);
         }
         return new Intention(Desire.RETRIEVE_BLOCK, path, 0);
+    }
+
+    private String requiredBlockDirection() {
+        if (requiredBlockOffset == null
+                || Math.abs(requiredBlockOffset.x()) + Math.abs(requiredBlockOffset.y()) != 1) {
+            return null;
+        }
+        if (requiredBlockOffset.x() == 1) return "e";
+        if (requiredBlockOffset.x() == -1) return "w";
+        if (requiredBlockOffset.y() == 1) return "s";
+        return "n";
     }
 
     private List<String> pathToAdjacentPosition(InternalMap.Position target) {
@@ -1796,16 +1911,25 @@ public class BasicAgent extends Agent {
             pendingAction = action;
             return new Action(action, new Identifier(direction));
         }
+        if (step.startsWith("submit:")) {
+            pendingAction = "submit";
+            return new Action("submit", new Identifier(step.substring(step.indexOf(':') + 1)));
+        }
         if (step.startsWith("rotate:")) {
             String direction = step.substring(step.indexOf(':') + 1);
             if (!rotationPossible(direction)) {
                 if (retrieveBlockDirection == null) {
                     resetCarriedBlockTracking();
+                    currentIntention = null;
+                    return skip();
                 } else {
                     rememberFailedRotationTarget(direction);
+                    String rotatedDirection = rotateDirection(
+                            retrieveBlockDirection, "cw".equals(direction));
+                    currentIntention = new Intention(
+                            Desire.CLEAR_OBSTACLE, List.of(rotatedDirection), 0);
+                    return executeClear();
                 }
-                currentIntention = createRetrieveBlockIntention();
-                return skip();
             }
             pendingAction = "rotate";
             pendingDirection = direction;
@@ -1937,7 +2061,7 @@ public class BasicAgent extends Agent {
         
         //printKnownAgentRelations();
         //System.out.println(goalPosition);
-        //System.out.println(currentIntention);
+        System.out.println(currentIntention);
         //printDispenserContents();
         
 

@@ -151,6 +151,7 @@ public class InternalMap {
         int step = -1;
         int vision = -1;
         Set<Position> occupiedRelativePositions = new HashSet<>();
+        Set<Position> visibleGoalZonePositions = new HashSet<>();
 
         for (Percept percept : percepts) {
             if (percept.getName().equals("step")
@@ -197,7 +198,12 @@ public class InternalMap {
                     && percept.getParameters().size() >= 2
                     && percept.getParameters().get(0) instanceof Numeral x
                     && percept.getParameters().get(1) instanceof Numeral y) {
-                rememberObservation(percept.getName(), x.getValue().intValue(), y.getValue().intValue(), "", step);
+                int relativeX = x.getValue().intValue();
+                int relativeY = y.getValue().intValue();
+                if (percept.getName().equals("goalZone")) {
+                    visibleGoalZonePositions.add(new Position(relativeX, relativeY));
+                }
+                rememberObservation(percept.getName(), relativeX, relativeY, "", step);
             }
         }
 
@@ -207,6 +213,10 @@ public class InternalMap {
                     if (Math.abs(x) + Math.abs(y) <= vision
                             && !occupiedRelativePositions.contains(new Position(x, y))) {
                         rememberFreeCell(x, y, step);
+                    }
+                    if (Math.abs(x) + Math.abs(y) <= vision
+                            && !visibleGoalZonePositions.contains(new Position(x, y))) {
+                        removeObservationTypeAt(agentX + x, agentY + y, "goalZone");
                     }
                 }
             }
@@ -405,6 +415,19 @@ public class InternalMap {
         }
         for (ObservationKey key : new ArrayList<>(keys)) {
             if (isBlocked(key.type())) {
+                removeObservation(key);
+            }
+        }
+    }
+
+    private void removeObservationTypeAt(int x, int y, String type) {
+        Position position = new Position(x, y);
+        Set<ObservationKey> keys = keysByPosition.get(position);
+        if (keys == null) {
+            return;
+        }
+        for (ObservationKey key : new ArrayList<>(keys)) {
+            if (key.type().equals(type)) {
                 removeObservation(key);
             }
         }

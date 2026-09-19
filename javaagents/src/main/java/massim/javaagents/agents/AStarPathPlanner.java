@@ -85,7 +85,8 @@ public class AStarPathPlanner {
                                           InternalMap.Position goal,
                                           String blockDirection,
                                           List<InternalMap.Position> blockedPositions) {
-        return findCarryingPath(start, goal, blockDirection, blockedPositions, Set.of(), true);
+        return findCarryingPath(start, goal, blockDirection, blockedPositions,
+            Set.of(), null, false, true);
     }
 
     public List<String> findCarryingPath(InternalMap.Position start,
@@ -94,7 +95,18 @@ public class AStarPathPlanner {
                                          List<InternalMap.Position> blockedPositions,
                                          Set<InternalMap.Position> occupiedPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-            occupiedPositions, true);
+            occupiedPositions, null, false, true);
+    }
+
+    /** Finds a carrying path that ends with the agent at the goal and the block at the required side. */
+    public List<String> findCarryingPathToAgentPosition(InternalMap.Position start,
+                                                         InternalMap.Position goal,
+                                                         String blockDirection,
+                                                         String requiredBlockDirection,
+                                                         List<InternalMap.Position> blockedPositions,
+                                                         Set<InternalMap.Position> occupiedPositions) {
+        return findCarryingPath(start, goal, blockDirection, blockedPositions,
+            occupiedPositions, requiredBlockDirection, true, true);
     }
 
     private List<String> findCarryingPath(InternalMap.Position start,
@@ -102,8 +114,10 @@ public class AStarPathPlanner {
                                            String blockDirection,
                                            List<InternalMap.Position> blockedPositions,
                                            Set<InternalMap.Position> occupiedPositions,
+                                           String requiredBlockDirection,
+                                           boolean goalIsAgentPosition,
                                            boolean fallback) {
-                        Set<InternalMap.Position> blocked = fallback
+        Set<InternalMap.Position> blocked = fallback
                             ? new HashSet<>() : new HashSet<>(blockedPositions);
         blocked.remove(start);
         CarryState startState = new CarryState(start, blockDirection, null);
@@ -126,7 +140,11 @@ public class AStarPathPlanner {
             CarryNode current = open.poll();
             CarryState state = current.state();
             InternalMap.Position blockPosition = offsetPosition(state.position(), state.blockDirection());
-            if (blockPosition.equals(goal) && isCarryGoalValid(state, blocked, occupiedPositions)) {
+                boolean reachedGoal = goalIsAgentPosition
+                    ? state.position().equals(goal)
+                    && state.blockDirection().equals(requiredBlockDirection)
+                    : blockPosition.equals(goal);
+                if (reachedGoal && isCarryGoalValid(state, blocked, occupiedPositions)) {
                 return reconstructCarryingPath(parents, actions, startState, state);
             }
 
@@ -143,6 +161,9 @@ public class AStarPathPlanner {
             }
 
             for (String direction : List.of("n", "e", "s", "w")) {
+                if (!oppositeDirection(direction).equals(state.blockDirection())) {
+                    continue;
+                }
                 int[] offset = directionOffset(direction);
                 InternalMap.Position nextPosition = new InternalMap.Position(
                         state.position().x() + offset[0], state.position().y() + offset[1]);
@@ -158,7 +179,7 @@ public class AStarPathPlanner {
         }
         if (!fallback && !blocked.isEmpty()) {
             return findCarryingPath(start, goal, blockDirection, List.of(),
-                    occupiedPositions, true);
+                occupiedPositions, requiredBlockDirection, goalIsAgentPosition, true);
         }
         return List.of();
     }
@@ -227,6 +248,16 @@ public class AStarPathPlanner {
             case "e" -> clockwise ? "s" : "n";
             case "s" -> clockwise ? "w" : "e";
             case "w" -> clockwise ? "n" : "s";
+            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
+        };
+    }
+
+    private String oppositeDirection(String direction) {
+        return switch (direction) {
+            case "n" -> "s";
+            case "e" -> "w";
+            case "s" -> "n";
+            case "w" -> "e";
             default -> throw new IllegalArgumentException("Invalid direction: " + direction);
         };
     }
