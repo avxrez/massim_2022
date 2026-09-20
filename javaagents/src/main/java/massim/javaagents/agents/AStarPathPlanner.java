@@ -64,6 +64,7 @@ public class AStarPathPlanner {
                                  List<InternalMap.Position> blockedPositions,
                                  Set<InternalMap.Position> occupiedPositions) {
         Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
+        blocked.addAll(occupiedPositions);
         blocked.remove(start);
 
         int margin = Math.min(blocked.size() + 1, MAX_SEARCH_MARGIN);
@@ -118,7 +119,8 @@ public class AStarPathPlanner {
                                            boolean goalIsAgentPosition,
                                            boolean fallback) {
         Set<InternalMap.Position> blocked = fallback
-                            ? new HashSet<>() : new HashSet<>(blockedPositions);
+                    ? new HashSet<>() : new HashSet<>(blockedPositions);
+        blocked.addAll(occupiedPositions);
         blocked.remove(start);
         CarryState startState = new CarryState(start, blockDirection, null);
         PriorityQueue<CarryNode> open = new PriorityQueue<>(
