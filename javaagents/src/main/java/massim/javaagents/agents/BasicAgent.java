@@ -35,7 +35,8 @@ public class BasicAgent extends Agent {
         RETRIEVE_BLOCK,
         WAIT,
         REACH_ROLE_ZONE,
-        ADAPT_ROLE
+        ADAPT_ROLE,
+        SUBMIT
     }
 
     // ============================================================
@@ -62,6 +63,7 @@ public class BasicAgent extends Agent {
     private static final int ROLE_ZONE_MAX_DISTANCE = 20;
     private static final String DEFAULT_ROLE = "default";
     private static final String WORKER_ROLE = "worker";
+    private static final String SERVER_AGENT_PREFIX = "agent";
 
     private String leaderName = "";
     private int lastID = -1;
@@ -89,6 +91,10 @@ public class BasicAgent extends Agent {
     private InternalMap.Position requiredBlockOffset;
 
     private final Set<String> requiredDispenserTypes = new HashSet<>();
+    private final Set<InternalMap.Position> assembledBlockPositions = new HashSet<>();
+    private final Map<InternalMap.Position, String> assembledBlockTypes = new HashMap<>();
+    private final Map<InternalMap.Position, PendingAssemblyAttachment> pendingAssemblyDeliveries = new HashMap<>();
+    private final Set<String> pendingAssemblyDetaches = new HashSet<>();
     private final List<String> taskBlockTypes = new ArrayList<>();
     private final List<InternalMap.Position> taskRequirementOffsets = new ArrayList<>();
     private final Map<String, InternalMap.Position> knownAgents = new HashMap<>();
@@ -112,6 +118,9 @@ public class BasicAgent extends Agent {
     private record PendingAssemblyAttachment(String member, String blockType,
             InternalMap.Position targetPosition, String detachDirection) {}
 
+        private record PendingAssemblyConnection(String partner, String blockType,
+            InternalMap.Position targetPosition, int leaderBlockX, int leaderBlockY) {}
+
     // ============================================================
     // CURRENT INTENTION
     // ============================================================
@@ -132,6 +141,7 @@ public class BasicAgent extends Agent {
     private String pendingDirection;
     private String clearDirection;
     private PendingAssemblyAttachment pendingAssemblyAttachment;
+    private PendingAssemblyConnection pendingAssemblyConnection;
 
 
     // ============================================================
@@ -458,10 +468,10 @@ public class BasicAgent extends Agent {
                 int targetDistance = distanceTo(target.x(), target.y(),
                     assemblyPosition.x(), assemblyPosition.y());
                 if (targetDistance != 1) {
-                System.out.println(getName() + " ignores stale group block delivery from " + sender
-                    + ": target (" + target.x() + ", " + target.y()
-                    + ") is not adjacent to leader at (" + assemblyPosition.x()
-                        + ", " + assemblyPosition.y() + "); leader is still moving");
+                    PendingAssemblyAttachment delivery = new PendingAssemblyAttachment(
+                            sender, blockType.getValue(), target, null);
+                    pendingAssemblyDeliveries.put(target, delivery);
+                    tryStartPendingAssemblyConnection(delivery);
                 return;
                 }
                 String attachDirection = directionTo(target, assemblyPosition);
@@ -477,12 +487,36 @@ public class BasicAgent extends Agent {
             return;
         }
 
+        if (message.getName().equals("groupConnectRequest")
+                && message.getParameters().size() >= 4
+                && message.getParameters().get(0) instanceof Numeral leaderBlockX
+                && message.getParameters().get(1) instanceof Numeral leaderBlockY
+                && message.getParameters().get(2) instanceof Numeral targetX
+                && message.getParameters().get(3) instanceof Numeral targetY
+                && sender.equals(currentGroupLeader)) {
+            pendingAssemblyConnection = new PendingAssemblyConnection(
+                    sender,
+                    deliveryBlockType,
+                    new InternalMap.Position(targetX.getValue().intValue(), targetY.getValue().intValue()),
+                    leaderBlockX.getValue().intValue(), leaderBlockY.getValue().intValue());
+            currentIntention = new Intention(Desire.RETRIEVE_BLOCK, List.of("connect"), 0);
+            return;
+        }
+
         if (message.getName().equals("groupDetachBlock")
                 && !currentGroupLeader.isEmpty()
                 && sender.equals(currentGroupLeader)) {
             detachRequested = true;
             currentIntention = null;
             System.out.println(getName() + " received detach instruction for delivered block");
+            return;
+        }
+
+        if (message.getName().equals("groupBlockDetached")
+                && leaderName.equals(getName())) {
+            pendingAssemblyDetaches.remove(sender);
+            System.out.println(getName() + " received detach confirmation from " + sender
+                    + "; pending detaches: " + pendingAssemblyDetaches);
             return;
         }
 
@@ -906,6 +940,13 @@ public class BasicAgent extends Agent {
         return number.isEmpty() ? -1 : Integer.parseInt(number);
     }
 
+    private String serverAgentName(String agentName) {
+        if (agentName == null || agentName.startsWith(SERVER_AGENT_PREFIX)) {
+            return agentName;
+        }
+        return SERVER_AGENT_PREFIX + agentName;
+    }
+
     private void exchangeTeammateNames() {
         for (InternalMap.Position teammate : internalMap.getVisibleTeammates()) {
             if (isKnownTeammateAt(teammate)) {
@@ -1152,6 +1193,12 @@ public class BasicAgent extends Agent {
         List<String> members = new ArrayList<>(currentGroupMembers);
         members.sort(String::compareTo);
 
+        assembledBlockPositions.clear();
+        assembledBlockTypes.clear();
+        pendingAssemblyDeliveries.clear();
+        pendingAssemblyDetaches.clear();
+        pendingAssemblyConnection = null;
+
         InternalMap.Position leaderGoalAnchor = new InternalMap.Position(
                 internalMap.getAgentX(), internalMap.getAgentY());
         if (leaderGoalAnchor == null) {
@@ -1215,6 +1262,60 @@ public class BasicAgent extends Agent {
                         new Numeral(goalPosition.y())),
                     currentGroupLeader, getName());
         }
+    }
+
+        private void tryStartPendingAssemblyConnection(PendingAssemblyAttachment delivery) {
+        if (!leaderName.equals(getName()) || goalPosition == null
+            || pendingAssemblyConnection != null) {
+            return;
+        }
+
+        InternalMap.Position bridge = findAssembledBridge(delivery.targetPosition());
+        if (bridge == null) {
+            System.out.println(getName() + " waits for bridge block at ("
+                + delivery.targetPosition().x() + ", " + delivery.targetPosition().y()
+                + ") before connecting block at ("
+                + delivery.targetPosition().x() + ", " + delivery.targetPosition().y() + ")");
+            return;
+        }
+
+        int leaderBlockX = bridge.x() - internalMap.getAgentX();
+        int leaderBlockY = bridge.y() - internalMap.getAgentY();
+        pendingAssemblyConnection = new PendingAssemblyConnection(
+            delivery.member(), delivery.blockType(), delivery.targetPosition(), leaderBlockX, leaderBlockY);
+        pendingAssemblyDeliveries.remove(delivery.targetPosition());
+        currentIntention = new Intention(Desire.RETRIEVE_BLOCK,
+            List.of("connect:" + delivery.member() + ":" + leaderBlockX + ":" + leaderBlockY), 0);
+        sendMessage(new Percept("groupConnectRequest",
+            new Numeral(leaderBlockX),
+            new Numeral(leaderBlockY),
+            new Numeral(delivery.targetPosition().x()),
+            new Numeral(delivery.targetPosition().y())), delivery.member(), getName());
+        }
+
+    private void startNextPendingAssemblyConnection() {
+        if (goalPosition == null || pendingAssemblyConnection != null) {
+            return;
+        }
+        for (PendingAssemblyAttachment delivery
+                : new ArrayList<>(pendingAssemblyDeliveries.values())) {
+            if (findAssembledBridge(delivery.targetPosition()) != null) {
+                tryStartPendingAssemblyConnection(delivery);
+                return;
+            }
+        }
+    }
+
+    private InternalMap.Position findAssembledBridge(InternalMap.Position target) {
+        for (String direction : List.of("n", "e", "s", "w")) {
+            int[] offset = directionOffset(direction);
+            InternalMap.Position candidate = new InternalMap.Position(
+                    target.x() + offset[0], target.y() + offset[1]);
+            if (assembledBlockPositions.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private boolean isKnownGoalZone(InternalMap.Position position) {
@@ -1289,6 +1390,11 @@ public class BasicAgent extends Agent {
         deliveryBlockType = null;
         goalPosition = null;
         pendingAssemblyAttachment = null;
+        pendingAssemblyConnection = null;
+        assembledBlockPositions.clear();
+        assembledBlockTypes.clear();
+        pendingAssemblyDeliveries.clear();
+        pendingAssemblyDetaches.clear();
         currentIntention = null;
         if (!blockRetrieved) {
             resetCarriedBlockTracking();
@@ -1464,28 +1570,56 @@ public class BasicAgent extends Agent {
                 blockRequested = true;
             } else if ("attach".equals(lastAction)) {
                 if (pendingAssemblyAttachment != null) {
+                    assembledBlockPositions.add(pendingAssemblyAttachment.targetPosition());
+                        assembledBlockTypes.put(relativeAssemblyPosition(
+                            pendingAssemblyAttachment.targetPosition()),
+                            pendingAssemblyAttachment.blockType());
+                            pendingAssemblyDetaches.add(pendingAssemblyAttachment.member());
                     sendMessage(new Percept("groupDetachBlock"),
                             pendingAssemblyAttachment.member(), getName());
-                    deliveryBlockType = null;
-                    goalPosition = null;
+                    pendingAssemblyDeliveries.remove(pendingAssemblyAttachment.targetPosition());
                     pendingAssemblyAttachment = null;
                     currentIntention = null;
                     resetCarriedBlockTracking();
+                    startNextPendingAssemblyConnection();
                     return;
                 }
                 blockRetrieved = true;
                 carriedBlockType = deliveryBlockType;
                 attachmentCheckPending = true;
+            } else if ("connect".equals(lastAction)
+                    && pendingAssemblyConnection != null) {
+                if (getName().equals(leaderName)) {
+                    pendingAssemblyDetaches.add(pendingAssemblyConnection.partner());
+                    sendMessage(new Percept("groupDetachBlock"),
+                            pendingAssemblyConnection.partner(), getName());
+                }
+                assembledBlockPositions.add(pendingAssemblyConnection.targetPosition());
+                assembledBlockTypes.put(relativeAssemblyPosition(
+                    pendingAssemblyConnection.targetPosition()),
+                    pendingAssemblyConnection.blockType());
+                pendingAssemblyDeliveries.remove(pendingAssemblyConnection.targetPosition());
+                pendingAssemblyConnection = null;
+                currentIntention = null;
+                blockPlaced = true;
+                startNextPendingAssemblyConnection();
             } else if ("detach".equals(lastAction)) {
                 detachRequested = false;
-                resetCarriedBlockTracking();
-            } else if ("submit".equals(lastAction)) {
-                if (currentTaskBlockCount == 1 && isTaskActive()) {
-                    resetCarriedBlockTracking();
-                    currentIntention = null;
-                } else {
-                    blockPlaced = true;
+                if (!currentGroupLeader.isEmpty()) {
+                    sendMessage(new Percept("groupBlockDetached", new Identifier(getName())),
+                            currentGroupLeader, getName());
                 }
+                resetCarriedBlockTracking();
+                currentIntention = null;
+                if (deliveryBlockType != null && currentGroupLeader != null
+                        && !currentGroupLeader.isEmpty()) {
+                    System.out.println(getName() + " detached successfully and resumes retrieving "
+                            + deliveryBlockType + " for group leader " + currentGroupLeader);
+                }
+            } else if ("submit".equals(lastAction)) {
+                System.out.println(getName() + " submitted completed task " + currentTask
+                        + "; resetting assembly map");
+                resetRetrieveAssignment();
             }
         } else {
             if ("clear".equals(lastAction)
@@ -1501,6 +1635,10 @@ public class BasicAgent extends Agent {
             } else if ("rotate".equals(lastAction) && retrieveBlockDirection != null) {
                 rememberFailedRotationTarget();
                 currentIntention = createRetrieveBlockIntention();
+            } else if ("connect".equals(lastAction)
+                    && pendingAssemblyConnection != null) {
+                currentIntention = new Intention(Desire.RETRIEVE_BLOCK,
+                        currentIntention.plan(), currentIntention.nextAction());
             } else if ("move".equals(lastAction) && pendingDirection != null) {
                 int[] offset = directionOffset(pendingDirection);
                 int blockedX = internalMap.getAgentX() + offset[0];
@@ -1642,6 +1780,18 @@ public class BasicAgent extends Agent {
                 desires.add(Desire.REACH_ROLE_ZONE);
                 return desires;
             }
+
+        }
+
+        if (leaderName.equals(getName())
+                && currentTask != null
+                && isTaskActive()
+                && currentTaskBlockCount > 1
+                && goalPosition != null
+                && isAtGoalZone()
+                && isAssemblyComplete()) {
+            desires.add(Desire.SUBMIT);
+            return desires;
         }
 
         if (currentTask != null && isTaskActive() && currentTaskBlockCount > 1
@@ -1683,6 +1833,30 @@ public class BasicAgent extends Agent {
     // ============================================================
     // DESIRE CONDITIONS
     // ============================================================
+
+    private boolean isAssemblyComplete() {
+        if (goalPosition == null || taskRequirementOffsets.size() != taskBlockTypes.size()
+                || taskRequirementOffsets.isEmpty()
+                || !pendingAssemblyDetaches.isEmpty()) {
+            return false;
+        }
+
+        for (int index = 0; index < taskRequirementOffsets.size(); index++) {
+            InternalMap.Position offset = taskRequirementOffsets.get(index);
+                String actualType = assembledBlockTypes.get(offset);
+            if (actualType == null
+                    || !actualType.equalsIgnoreCase(taskBlockTypes.get(index))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private InternalMap.Position relativeAssemblyPosition(InternalMap.Position absolutePosition) {
+        return new InternalMap.Position(
+                absolutePosition.x() - internalMap.getAgentX(),
+                absolutePosition.y() - internalMap.getAgentY());
+    }
 
     private boolean hasObservation(String type) {
         return internalMap.getObservations().stream().anyMatch(observation -> observation.type().equals(type));
@@ -1771,6 +1945,9 @@ public class BasicAgent extends Agent {
         }
         if (desires.contains(Desire.ADAPT_ROLE)) {
             return new Intention(Desire.ADAPT_ROLE, List.of(WORKER_ROLE), 0);
+        }
+        if (desires.contains(Desire.SUBMIT)) {
+            return new Intention(Desire.SUBMIT, List.of("submit:" + currentTask), 0);
         }
         if (detachRequested && desires.contains(Desire.RETRIEVE_BLOCK)) {
             return createDetachIntention();
@@ -2145,6 +2322,10 @@ public class BasicAgent extends Agent {
                 return;
             }
 
+            if (pendingAssemblyConnection != null) {
+                return;
+            }
+
             if (currentIntention.desire() == Desire.RETRIEVE_BLOCK
                     && currentIntention.plan().size() > 1
                     && currentIntention.plan().stream().anyMatch(step -> step.startsWith("clear:")
@@ -2218,6 +2399,9 @@ public class BasicAgent extends Agent {
         if (currentIntention.desire() == Desire.ADAPT_ROLE) {
             return executeAdapt();
         }
+        if (currentIntention.desire() == Desire.SUBMIT) {
+            return executeSubmit();
+        }
         if (currentIntention.desire() == Desire.RETRIEVE_BLOCK) {
             return executeRetrieveBlock();
         }
@@ -2227,6 +2411,11 @@ public class BasicAgent extends Agent {
     private Action executeAdapt() {
         pendingAction = "adapt";
         return new Action("adapt", new Identifier(currentIntention.plan().get(0)));
+    }
+
+    private Action executeSubmit() {
+        pendingAction = "submit";
+        return new Action("submit", new Identifier(currentTask));
     }
 
     private Action executeMove() {
@@ -2246,6 +2435,30 @@ public class BasicAgent extends Agent {
 
     private Action executeRetrieveBlock() {
         String step = currentIntention.plan().get(currentIntention.nextAction());
+        if ("connect".equals(step) || step.startsWith("connect:")) {
+            if (pendingAssemblyConnection == null) {
+                return skip();
+            }
+            int blockX;
+            int blockY;
+            if (getName().equals(leaderName)) {
+                blockX = pendingAssemblyConnection.leaderBlockX();
+                blockY = pendingAssemblyConnection.leaderBlockY();
+            } else if (carriedBlockPosition != null) {
+                blockX = carriedBlockPosition.x() - internalMap.getAgentX();
+                blockY = carriedBlockPosition.y() - internalMap.getAgentY();
+            } else {
+                return skip();
+            }
+            System.out.println(getName() + " sends connect(" + serverAgentName(pendingAssemblyConnection.partner())
+                    + ", " + blockX + ", " + blockY + ") for target ("
+                    + pendingAssemblyConnection.targetPosition().x() + ", "
+                    + pendingAssemblyConnection.targetPosition().y() + ")");
+            pendingAction = "connect";
+            return new Action("connect",
+                    new Identifier(serverAgentName(pendingAssemblyConnection.partner())),
+                    new Numeral(blockX), new Numeral(blockY));
+        }
         if (step.startsWith("request:") || step.startsWith("attach:") || step.startsWith("detach:")) {
             String action = step.substring(0, step.indexOf(':'));
             String direction = step.substring(step.indexOf(':') + 1);
