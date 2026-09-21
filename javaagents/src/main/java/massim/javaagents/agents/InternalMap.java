@@ -40,6 +40,11 @@ public class InternalMap {
     /** Zellen, auf denen aktuell (in diesem Schritt) eine Entity gesehen wurde. */
     private final Set<Position> occupiedEntityPositions = new HashSet<>();
 
+    /** Task cells reserved for assembly; treated like occupied entities while pathfinding. */
+    private final Set<Position> reservedAssemblyPositions = new HashSet<>();
+    private final Map<String, Set<Position>> reservationGroups = new HashMap<>();
+    private String localReservationOwner = "local";
+
     /** Zellen, auf denen aktuell sichtbare Teammitglieder stehen. */
     private final Set<Position> visibleTeammates = new HashSet<>();
 
@@ -233,6 +238,71 @@ public class InternalMap {
 
     /** Returns the positions currently occupied by visible entities. */
     public Set<Position> getOccupiedEntityPositions() {
+        Set<Position> occupied = new HashSet<>(occupiedEntityPositions);
+        occupied.addAll(reservedAssemblyPositions);
+        return Set.copyOf(occupied);
+    }
+
+    public void setReservedAssemblyPositions(Set<Position> positions) {
+        setReservedAssemblyPositions("local", positions);
+    }
+
+    public void setReservedAssemblyPositions(String owner, Set<Position> positions) {
+        localReservationOwner = owner;
+        reservedAssemblyPositions.clear();
+        reservationGroups.put(owner, new HashSet<>(positions));
+        refreshReservedAssemblyPositions();
+    }
+
+    public void clearReservedAssemblyPositions() {
+        clearReservedAssemblyPositions("local");
+    }
+
+    public void clearReservedAssemblyPositions(String owner) {
+        localReservationOwner = owner;
+        reservationGroups.remove(owner);
+        refreshReservedAssemblyPositions();
+    }
+
+    public void replaceReservationSnapshot(Parameter parameter) {
+        if (!(parameter instanceof ParameterList map)) {
+            return;
+        }
+        Set<Position> localReservations = reservationGroups.getOrDefault(
+            localReservationOwner, Set.of());
+        reservationGroups.clear();
+        if (!localReservations.isEmpty()) {
+            reservationGroups.put(localReservationOwner, new HashSet<>(localReservations));
+        }
+        for (Parameter entry : map) {
+            if (!(entry instanceof Function reservation)
+                    || !reservation.getName().equals("reservation")
+                    || reservation.getParameters().size() < 3
+                    || !(reservation.getParameters().get(0) instanceof Identifier owner)
+                    || !(reservation.getParameters().get(1) instanceof Numeral x)
+                    || !(reservation.getParameters().get(2) instanceof Numeral y)) {
+                continue;
+            }
+            reservationGroups.computeIfAbsent(owner.getValue(), ignored -> new HashSet<>())
+                    .add(new Position(x.getValue().intValue(), y.getValue().intValue()));
+        }
+        refreshReservedAssemblyPositions();
+    }
+
+    public boolean isReservedAssemblyPosition(Position position) {
+        return reservedAssemblyPositions.contains(position);
+    }
+
+    /** Returns a snapshot of reservation cells grouped by their owner. */
+    public Map<String, Set<Position>> getReservationGroups() {
+        Map<String, Set<Position>> snapshot = new HashMap<>();
+        for (Map.Entry<String, Set<Position>> entry : reservationGroups.entrySet()) {
+            snapshot.put(entry.getKey(), Set.copyOf(entry.getValue()));
+        }
+        return Map.copyOf(snapshot);
+    }
+
+    public Set<Position> getPhysicalOccupiedEntityPositions() {
         return Set.copyOf(occupiedEntityPositions);
     }
 
@@ -261,6 +331,14 @@ public class InternalMap {
                     new Numeral(observation.y()),
                     new Identifier(observation.details()),
                     new Numeral(observation.lastSeenStep())));
+        }
+        for (Map.Entry<String, Set<Position>> group : reservationGroups.entrySet()) {
+            for (Position position : group.getValue()) {
+                map.add(new Function("reservation",
+                        new Identifier(group.getKey()),
+                        new Numeral(position.x()),
+                        new Numeral(position.y())));
+            }
         }
         return map;
     }
@@ -316,6 +394,11 @@ public class InternalMap {
         return parsed;
     }
 
+    private void refreshReservedAssemblyPositions() {
+        reservedAssemblyPositions.clear();
+        reservationGroups.values().forEach(reservedAssemblyPositions::addAll);
+    }
+
     // -------------------------------------------------------------------------
     // Query map
     // -------------------------------------------------------------------------
@@ -369,7 +452,19 @@ public class InternalMap {
         Set<Position> blockedPositions = new HashSet<>(occupiedEntityPositions);
         observations.values().stream()
                 .filter(observation -> observation.type().equals("obstacle")
-                        || observation.type().equals("failedPath"))
+                || observation.type().equals("failedPath")
+                || observation.type().equals("block"))
+                .map(observation -> new Position(observation.x(), observation.y()))
+                .forEach(blockedPositions::add);
+        return List.copyOf(blockedPositions);
+    }
+
+    public List<Position> getPhysicalBlockedPositions() {
+        Set<Position> blockedPositions = new HashSet<>(occupiedEntityPositions);
+        observations.values().stream()
+                .filter(observation -> observation.type().equals("obstacle")
+                || observation.type().equals("failedPath")
+                || observation.type().equals("block"))
                 .map(observation -> new Position(observation.x(), observation.y()))
                 .forEach(blockedPositions::add);
         return List.copyOf(blockedPositions);
@@ -483,7 +578,9 @@ public class InternalMap {
     }
 
     private boolean isBlocked(String type) {
-        return type.equals("obstacle") || type.equals("failedPath");
+        return type.equals("obstacle")
+                || type.equals("failedPath")
+                || type.equals("block");
     }
 
     /**
@@ -522,5 +619,18 @@ public class InternalMap {
         }
         occupiedEntityPositions.clear();
         occupiedEntityPositions.addAll(translatedEntities);
+
+        Map<String, Set<Position>> translatedReservations = new HashMap<>();
+        for (Map.Entry<String, Set<Position>> entry : reservationGroups.entrySet()) {
+            Set<Position> translatedPositions = new HashSet<>();
+            for (Position position : entry.getValue()) {
+                translatedPositions.add(new Position(
+                        position.x() + offsetX, position.y() + offsetY));
+            }
+            translatedReservations.put(entry.getKey(), translatedPositions);
+        }
+        reservationGroups.clear();
+        reservationGroups.putAll(translatedReservations);
+        refreshReservedAssemblyPositions();
     }
 }
