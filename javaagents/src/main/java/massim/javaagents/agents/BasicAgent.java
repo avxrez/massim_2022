@@ -75,6 +75,7 @@ public class BasicAgent extends Agent {
     private boolean deactivated;
     private String currentRole = "";
     private String currentTask;
+    private final List<Percept> currentTasks = new ArrayList<>();
     private String teamName = "";
             private final Map<String, Boolean> knownAgentGroupState = new HashMap<>();
             private final Map<String, String> knownAgentGroupLeader = new HashMap<>();
@@ -214,11 +215,6 @@ public class BasicAgent extends Agent {
         }
 
         if (message.getName().equals("mapUpdate")
-                && message.getParameters().size() >= 5) {
-            internalMap.mergeObservations(message.getParameters().get(4));
-        }
-
-        if (message.getName().equals("mapUpdate")
                 && message.getParameters().size() >= 6
                 && message.getParameters().get(0) instanceof Numeral senderX
                 && message.getParameters().get(1) instanceof Numeral senderY
@@ -226,8 +222,10 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(3) instanceof Numeral targetY
                 && message.getParameters().get(5) instanceof Identifier senderLeaderName
                 && leaderName.equals(senderLeaderName.getValue())) {
-                    rememberKnownAgent(sender,new InternalMap.Position(senderX.getValue().intValue(), senderY.getValue().intValue()), sender);
-                    updateKnownAgentGroupState(sender, message);
+            internalMap.mergeObservations(message.getParameters().get(4));
+            rememberKnownAgent(sender,
+                    new InternalMap.Position(senderX.getValue().intValue(), senderY.getValue().intValue()), sender);
+            updateKnownAgentGroupState(sender, message);
             if (message.getParameters().size() > 6) {
                 mergeKnownAgents(message.getParameters().get(6), sender);
             }
@@ -239,9 +237,7 @@ public class BasicAgent extends Agent {
                                 targetX.getValue().intValue(), targetY.getValue().intValue()));
             }
             return;
-        }else if (message.getName().equals("mapUpdate")) {
-            System.out.println("missupdated from " + sender + " with leader " + message.getParameters().get(5) + " and my leader is " + leaderName);
-        }
+                }
 
         if (message.getName().equals("teammateRequest")
                 && message.getParameters().size() >= 5
@@ -415,30 +411,14 @@ public class BasicAgent extends Agent {
         }
 
         if (message.getName().equals("groupStart")
-                && message.getParameters().size() >= 2
-                && message.getParameters().get(0) instanceof Identifier task
-                && message.getParameters().get(1) instanceof Numeral size) {
-            if (currentTask != null
-                && currentTask.equals(task.getValue())
-                    && isTaskActive()
-                && !DEFAULT_ROLE.equals(currentRole)
+            && message.getParameters().isEmpty()) {
+            if (!DEFAULT_ROLE.equals(currentRole)
                 && !groupFormationActive
                 && (!knownAgentGroupState.getOrDefault(getName(), false)
                     || currentGroupLeader.equals(sender))) {
-                System.out.println(getName() + " received start signal for next group on task "
-                        + task.getValue() + " with target size " + size.getValue().intValue());
-                groupTaskName = task.getValue();
-                desiredGroupSize = size.getValue().intValue();
-                currentGroupLeader = getName();
-                groupLeaderMode = true;
-                groupFormationActive = true;
-                currentGroupMembers.clear();
-                currentGroupMembers.add(getName());
-                knownAgentGroupState.put(getName(), true);
-                knownAgentGroupLeader.put(getName(), getName());
-                System.out.println(getName() + " starts new group as leader for task " + groupTaskName
-                        + " (size " + desiredGroupSize + ")");
-                inviteKnownAgentsToGroup();
+            System.out.println(getName()
+                + " received start signal to form a group for its own task " + currentTask);
+                startGroupFormationAsSuccessor();
             }
             return;
         }
@@ -897,6 +877,7 @@ public class BasicAgent extends Agent {
      */
     private void updateBeliefs(List<Percept> percepts) {
         requiredDispenserTypes.clear();
+        currentTasks.clear();
         boolean taskPerceptReceived = false;
         String previousTask = currentTask;
 
@@ -917,17 +898,22 @@ public class BasicAgent extends Agent {
                 case "deactivated" -> deactivated = identifierValue(percept, "false").equals("true");
                 case "task" -> {
                     taskPerceptReceived = true;
-                    currentTask = identifierValue(percept, currentTask);
-                    if (percept.getParameters().size() > 1
-                            && percept.getParameters().get(1) instanceof Numeral deadline) {
-                        taskDeadline = deadline.getValue().intValue();
-                    }
-                    rememberTaskRequirements(percept);
+                    currentTasks.add(percept);
                 }
                 default -> {
                     // Not a scalar belief.
                 }
             }
+        }
+
+        Percept selectedTaskPercept = currentTasks.stream()
+            .max((first, second) -> Long.compare(
+                remainingTaskTime(first), remainingTaskTime(second)))
+            .orElse(null);
+        if (selectedTaskPercept != null) {
+            currentTask = identifierValue(selectedTaskPercept, currentTask);
+            taskDeadline = taskDeadlineValue(selectedTaskPercept);
+            rememberTaskRequirements(selectedTaskPercept);
         }
 
         if (!taskPerceptReceived) {
@@ -955,6 +941,19 @@ public class BasicAgent extends Agent {
         if (deactivated) {
             resetCarriedBlockTracking();
         }
+    }
+
+    private int taskDeadlineValue(Percept taskPercept) {
+        if (taskPercept.getParameters().size() > 1
+                && taskPercept.getParameters().get(1) instanceof Numeral deadline) {
+            return deadline.getValue().intValue();
+        }
+        return -1;
+    }
+
+    private long remainingTaskTime(Percept taskPercept) {
+        int deadline = taskDeadlineValue(taskPercept);
+        return deadline < 0 ? Long.MAX_VALUE : (long) deadline - currentStep;
     }
 
     private boolean isVisibleTeammateAt(int x, int y) {
@@ -1116,8 +1115,68 @@ public class BasicAgent extends Agent {
     }
 
     private void startGroupFormation() {
+        if (!leaderName.equals(getName())) {
+            return;
+        }
+        startGroupFormationCore();
+    }
+
+    private void startGroupFormationAsSuccessor() {
+        startGroupFormationCore();
+    }
+
+    private boolean canFormTaskGroup(Percept taskPercept) {
+        int deadline = taskDeadlineValue(taskPercept);
+        if (deadline >= 0 && currentStep > deadline) {
+            return false;
+        }
+
+        int freeAgents = 1;
+        for (String agent : knownAgents.keySet()) {
+            if (!agent.equals(getName())
+                    && !Boolean.TRUE.equals(knownAgentGroupState.get(agent))) {
+                freeAgents++;
+            }
+        }
+        return taskGroupSize(taskPercept) <= freeAgents;
+    }
+
+    private boolean hasFormableGroupTask() {
+        return currentTasks.stream()
+                .anyMatch(task -> canFormTaskGroup(task) && taskGroupSize(task) > 1);
+    }
+
+    private int taskGroupSize(Percept taskPercept) {
+        if (taskPercept.getParameters().size() < 4
+                || !(taskPercept.getParameters().get(3) instanceof ParameterList requirements)) {
+            return 1;
+        }
+
+        int blockCount = 0;
+        for (Parameter requirement : requirements) {
+            if (requirement instanceof Function function
+                    && function.getParameters().size() >= 3) {
+                blockCount++;
+            }
+        }
+        return blockCount <= 1 ? 1 : blockCount + 1;
+    }
+
+    private void startGroupFormationCore() {
+        Percept selectedTask = currentTasks.stream()
+            .filter(this::canFormTaskGroup)
+            .max((first, second) -> Long.compare(
+                remainingTaskTime(first), remainingTaskTime(second)))
+            .orElse(null);
+        if (selectedTask == null) {
+            return;
+        }
+
+        currentTask = identifierValue(selectedTask, currentTask);
+        taskDeadline = taskDeadlineValue(selectedTask);
+        rememberTaskRequirements(selectedTask);
+
         if (desiredGroupSize <= 1
-                || !leaderName.equals(getName())
                 || groupFormationActive
                 || !explorationFinished
                 || currentTask == null
@@ -1221,9 +1280,7 @@ public class BasicAgent extends Agent {
                 continue;
             }
             System.out.println(getName() + " appoints " + agent + " as next group leader for task " + groupTaskName);
-            sendMessage(new Percept("groupStart",
-                    new Identifier(groupTaskName),
-                    new Numeral(desiredGroupSize)), agent, getName());
+                sendMessage(new Percept("groupStart"), agent, getName());
                     groupLeaderMode = false;
                     currentGroupLeader = getName();
             return;
@@ -1520,16 +1577,12 @@ public class BasicAgent extends Agent {
             }
         }
 
-        if (desiredGroupSize > 1
-                && leaderName.equals(getName())
+        if (leaderName.equals(getName())
                 && !groupFormationActive
                 && explorationFinished
                 && !waitingForNextTask
-                && currentTask != null
-            && !currentTask.isEmpty()
-            && deliveryBlockType == null
             && !Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
-            && isTaskActive()) {
+                && hasFormableGroupTask()) {
             startGroupFormation();
         }
 
