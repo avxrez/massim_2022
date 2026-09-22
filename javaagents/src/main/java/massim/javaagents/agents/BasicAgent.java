@@ -75,7 +75,48 @@ public class BasicAgent extends Agent {
     private boolean deactivated;
     private String currentRole = "";
     private String currentTask;
-    private final List<Percept> currentTasks = new ArrayList<>();
+    private record TaskInfo(String name, int deadline, List<String> blockTypes,
+            List<InternalMap.Position> offsets) {
+
+        private static TaskInfo fromPercept(Percept taskPercept) {
+            String name = taskPercept.getParameters().get(0) instanceof Identifier identifier
+                    ? identifier.getValue() : "";
+            int deadline = taskPercept.getParameters().size() > 1
+                    && taskPercept.getParameters().get(1) instanceof Numeral numeral
+                    ? numeral.getValue().intValue() : -1;
+            List<String> blockTypes = new ArrayList<>();
+            List<InternalMap.Position> offsets = new ArrayList<>();
+            if (taskPercept.getParameters().size() > 3
+                    && taskPercept.getParameters().get(3) instanceof ParameterList requirements) {
+                for (Parameter requirement : requirements) {
+                    if (requirement instanceof Function function
+                            && function.getParameters().size() >= 3
+                            && function.getParameters().get(0) instanceof Numeral x
+                            && function.getParameters().get(1) instanceof Numeral y
+                            && function.getParameters().get(2) instanceof Identifier type) {
+                        blockTypes.add(type.getValue());
+                        offsets.add(new InternalMap.Position(
+                                x.getValue().intValue(), y.getValue().intValue()));
+                    }
+                }
+            }
+            return new TaskInfo(name, deadline, List.copyOf(blockTypes), List.copyOf(offsets));
+        }
+
+        private int groupSize() {
+            return offsets.size() <= 1 ? 1 : offsets.size() + 1;
+        }
+
+        private boolean activeAt(int step) {
+            return deadline < 0 || step <= deadline;
+        }
+
+        private long remainingAt(int step) {
+            return deadline < 0 ? Long.MAX_VALUE : (long) deadline - step;
+        }
+    }
+    private final List<TaskInfo> currentTasks = new ArrayList<>();
+    private TaskInfo currentTaskInfo;
     private String teamName = "";
             private final Map<String, Boolean> knownAgentGroupState = new HashMap<>();
             private final Map<String, String> knownAgentGroupLeader = new HashMap<>();
@@ -876,7 +917,6 @@ public class BasicAgent extends Agent {
      * Updates scalar beliefs from the current percepts.
      */
     private void updateBeliefs(List<Percept> percepts) {
-        requiredDispenserTypes.clear();
         currentTasks.clear();
         boolean taskPerceptReceived = false;
         String previousTask = currentTask;
@@ -898,7 +938,7 @@ public class BasicAgent extends Agent {
                 case "deactivated" -> deactivated = identifierValue(percept, "false").equals("true");
                 case "task" -> {
                     taskPerceptReceived = true;
-                    currentTasks.add(percept);
+                    currentTasks.add(TaskInfo.fromPercept(percept));
                 }
                 default -> {
                     // Not a scalar belief.
@@ -906,20 +946,37 @@ public class BasicAgent extends Agent {
             }
         }
 
-        Percept selectedTaskPercept = currentTasks.stream()
-            .max((first, second) -> Long.compare(
-                remainingTaskTime(first), remainingTaskTime(second)))
-            .orElse(null);
-        if (selectedTaskPercept != null) {
-            currentTask = identifierValue(selectedTaskPercept, currentTask);
-            taskDeadline = taskDeadlineValue(selectedTaskPercept);
-            rememberTaskRequirements(selectedTaskPercept);
+        boolean currentTaskAvailable = currentTasks.stream()
+            .anyMatch(task -> task.name().equals(currentTask));
+        boolean selectNewTask = currentTask == null
+                || !currentTaskAvailable
+                || !isTaskActive()
+                || waitingForNextTask;
+        if (selectNewTask) {
+            TaskInfo selectedTask = currentTasks.stream()
+                    .filter(task -> task.activeAt(currentStep))
+                    .filter(task -> !waitingForNextTask
+                        || !task.name().equals(currentTask))
+                    .max((first, second) -> Long.compare(
+                            first.remainingAt(currentStep), second.remainingAt(currentStep)))
+                    .orElse(null);
+            if (selectedTask != null) {
+                applyTaskInfo(selectedTask);
+                waitingForNextTask = false;
+            } else if (waitingForNextTask || !currentTaskAvailable || !isTaskActive()) {
+                currentTask = null;
+                currentTaskInfo = null;
+                taskDeadline = -1;
+                requiredDispenserTypes.clear();
+            }
         }
 
         if (!taskPerceptReceived) {
             resetGroupStateForNewTask();
             currentTask = null;
+            currentTaskInfo = null;
             taskDeadline = -1;
+            requiredDispenserTypes.clear();
             currentTaskBlockCount = 1;
             desiredGroupSize = 1;
             requiredBlockOffset = null;
@@ -943,17 +1000,22 @@ public class BasicAgent extends Agent {
         }
     }
 
-    private int taskDeadlineValue(Percept taskPercept) {
-        if (taskPercept.getParameters().size() > 1
-                && taskPercept.getParameters().get(1) instanceof Numeral deadline) {
-            return deadline.getValue().intValue();
+    private void applyTaskInfo(TaskInfo taskInfo) {
+        currentTaskInfo = taskInfo;
+        currentTask = taskInfo.name();
+        taskDeadline = taskInfo.deadline();
+        requiredDispenserTypes.clear();
+        requiredDispenserTypes.addAll(taskInfo.blockTypes());
+        taskBlockTypes.clear();
+        taskBlockTypes.addAll(taskInfo.blockTypes());
+        taskRequirementOffsets.clear();
+        taskRequirementOffsets.addAll(taskInfo.offsets());
+        currentTaskBlockCount = taskInfo.blockTypes().size();
+        requiredBlockOffset = taskInfo.offsets().isEmpty() ? null : taskInfo.offsets().get(0);
+        if (currentTaskBlockCount <= 0) {
+            currentTaskBlockCount = 1;
         }
-        return -1;
-    }
-
-    private long remainingTaskTime(Percept taskPercept) {
-        int deadline = taskDeadlineValue(taskPercept);
-        return deadline < 0 ? Long.MAX_VALUE : (long) deadline - currentStep;
+        desiredGroupSize = taskInfo.groupSize();
     }
 
     private boolean isVisibleTeammateAt(int x, int y) {
@@ -1028,43 +1090,6 @@ public class BasicAgent extends Agent {
         sendMapUpdates(mapParameters());
     }
 
-    /**
-     * Extracts the dispenser requirements from the current task.
-     */
-    private void rememberTaskRequirements(Percept taskPercept) {
-        if (taskPercept.getParameters().size() < 4
-                || !(taskPercept.getParameters().get(3) instanceof ParameterList requirements)) {
-            return;
-        }
-
-        requiredDispenserTypes.clear();
-        taskBlockTypes.clear();
-        taskRequirementOffsets.clear();
-        currentTaskBlockCount = 0;
-        requiredBlockOffset = null;
-        for (Parameter requirement : requirements) {
-            if (requirement instanceof Function function
-                    && function.getParameters().size() >= 3
-                    && function.getParameters().get(0) instanceof Numeral requiredX
-                    && function.getParameters().get(1) instanceof Numeral requiredY
-                    && function.getParameters().get(2) instanceof Identifier type) {
-                requiredDispenserTypes.add(type.getValue());
-                taskBlockTypes.add(type.getValue());
-                InternalMap.Position offset = new InternalMap.Position(
-                        requiredX.getValue().intValue(), requiredY.getValue().intValue());
-                taskRequirementOffsets.add(offset);
-                if (currentTaskBlockCount == 0) {
-                    requiredBlockOffset = offset;
-                }
-                currentTaskBlockCount++;
-            }
-        }
-        if (currentTaskBlockCount <= 0) {
-            currentTaskBlockCount = 1;
-        }
-        desiredGroupSize = calculateDesiredGroupSize();
-    }
-
     private int calculateDesiredGroupSize() {
         if (currentTaskBlockCount <= 1) {
             return 1;
@@ -1125,9 +1150,8 @@ public class BasicAgent extends Agent {
         startGroupFormationCore();
     }
 
-    private boolean canFormTaskGroup(Percept taskPercept) {
-        int deadline = taskDeadlineValue(taskPercept);
-        if (deadline >= 0 && currentStep > deadline) {
+    private boolean canFormTaskGroup(TaskInfo taskInfo) {
+        if (!taskInfo.activeAt(currentStep)) {
             return false;
         }
 
@@ -1138,43 +1162,25 @@ public class BasicAgent extends Agent {
                 freeAgents++;
             }
         }
-        return taskGroupSize(taskPercept) <= freeAgents;
+        return taskInfo.groupSize() <= freeAgents;
     }
 
     private boolean hasFormableGroupTask() {
         return currentTasks.stream()
-                .anyMatch(task -> canFormTaskGroup(task) && taskGroupSize(task) > 1);
-    }
-
-    private int taskGroupSize(Percept taskPercept) {
-        if (taskPercept.getParameters().size() < 4
-                || !(taskPercept.getParameters().get(3) instanceof ParameterList requirements)) {
-            return 1;
-        }
-
-        int blockCount = 0;
-        for (Parameter requirement : requirements) {
-            if (requirement instanceof Function function
-                    && function.getParameters().size() >= 3) {
-                blockCount++;
-            }
-        }
-        return blockCount <= 1 ? 1 : blockCount + 1;
+                .anyMatch(task -> canFormTaskGroup(task) && task.groupSize() > 1);
     }
 
     private void startGroupFormationCore() {
-        Percept selectedTask = currentTasks.stream()
+        TaskInfo selectedTask = currentTasks.stream()
             .filter(this::canFormTaskGroup)
             .max((first, second) -> Long.compare(
-                remainingTaskTime(first), remainingTaskTime(second)))
+                first.remainingAt(currentStep), second.remainingAt(currentStep)))
             .orElse(null);
         if (selectedTask == null) {
             return;
         }
 
-        currentTask = identifierValue(selectedTask, currentTask);
-        taskDeadline = taskDeadlineValue(selectedTask);
-        rememberTaskRequirements(selectedTask);
+        applyTaskInfo(selectedTask);
 
         if (desiredGroupSize <= 1
                 || groupFormationActive
