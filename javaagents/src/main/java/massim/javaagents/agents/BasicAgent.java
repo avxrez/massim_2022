@@ -2203,7 +2203,7 @@ public class BasicAgent extends Agent {
             return null;
         }
 
-        List<String> path = pathPlanner.findPath(
+        List<String> path = findPathForCurrentState(
                 currentPosition(),
                 new InternalMap.Position(roleZone.x(), roleZone.y()),
             blockedPositionsForMovement(),
@@ -2228,7 +2228,7 @@ public class BasicAgent extends Agent {
             target = new InternalMap.Position(goal.x(), goal.y());
         }
 
-        List<String> path = pathPlanner.findPath(start, target,
+        List<String> path = findPathForCurrentState(start, target,
             blockedPositionsForMovement(), occupiedPositionsForMovement());
         if (isCurrentGroupLeader()
                 && currentTaskBlockCount > 1
@@ -2237,7 +2237,7 @@ public class BasicAgent extends Agent {
             if (replacement != null) {
                 relocateAssemblyGoal(replacement);
                 target = replacement;
-                path = pathPlanner.findPath(start, target,
+                path = findPathForCurrentState(start, target,
                         blockedPositionsForMovement(), occupiedPositionsForMovement());
             }
         }
@@ -2249,6 +2249,32 @@ public class BasicAgent extends Agent {
 
     private boolean pathExists(List<String> path) {
         return path != null && !path.isEmpty();
+    }
+
+    private List<String> findPathForCurrentState(InternalMap.Position start,
+            InternalMap.Position goal, List<InternalMap.Position> blockedPositions,
+            Set<InternalMap.Position> occupiedPositions) {
+        if (isCarryingBlock()) {
+            return pathPlanner.findCarryingPath(start, goal, retrieveBlockDirection,
+                    blockedPositions, occupiedPositions);
+        }
+        return pathPlanner.findPath(start, goal, blockedPositions, occupiedPositions);
+    }
+
+    private List<String> findPathForCurrentState(InternalMap.Position start,
+            InternalMap.Position goal, String requiredBlockDirection,
+            List<InternalMap.Position> blockedPositions,
+            Set<InternalMap.Position> occupiedPositions) {
+        if (isCarryingBlock() && requiredBlockDirection != null) {
+            return pathPlanner.findCarryingPathToAgentPosition(start, goal,
+                    retrieveBlockDirection, requiredBlockDirection,
+                    blockedPositions, occupiedPositions);
+        }
+        return findPathForCurrentState(start, goal, blockedPositions, occupiedPositions);
+    }
+
+    private boolean isCarryingBlock() {
+        return blockRetrieved && retrieveBlockDirection != null;
     }
 
     private boolean isPhysicallyOccupied(InternalMap.Position position) {
@@ -2263,7 +2289,7 @@ public class BasicAgent extends Agent {
                 .map(observation -> new InternalMap.Position(observation.x(), observation.y()))
                 .filter(candidate -> !candidate.equals(currentTarget))
                 .filter(candidate -> !isPhysicallyOccupied(candidate))
-                .filter(candidate -> pathExists(pathPlanner.findPath(start, candidate,
+                .filter(candidate -> pathExists(findPathForCurrentState(start, candidate,
                         blockedPositionsForMovement(), occupiedPositionsForMovement())))
                 .min((first, second) -> Integer.compare(
                         distanceTo(first.x(), first.y(), start.x(), start.y()),
@@ -2340,8 +2366,8 @@ public class BasicAgent extends Agent {
                         List.of("submit:" + currentTask), 0);
             }
 
-            List<String> path = pathPlanner.findCarryingPathToAgentPosition(currentPosition(), deliveryTarget,
-                    retrieveBlockDirection, requiredDirection, blockedPositionsForMovement(),
+                List<String> path = findPathForCurrentState(currentPosition(), deliveryTarget,
+                    requiredDirection, blockedPositionsForMovement(),
                     occupiedPositionsForMovement());
             if (path.isEmpty()) {
                 return new Intention(Desire.WAIT, List.of(), 0);
@@ -2359,8 +2385,8 @@ public class BasicAgent extends Agent {
             blockPlaced = true;
             return new Intention(Desire.WAIT, List.of(), 0);
         }
-        List<String> path = pathPlanner.findCarryingPath(currentPosition(), deliveryTarget,
-            retrieveBlockDirection, blockedPositionsForMovement(),
+        List<String> path = findPathForCurrentState(currentPosition(), deliveryTarget,
+            blockedPositionsForMovement(),
             occupiedPositionsForMovement());
         if (path.isEmpty()) {
             return new Intention(Desire.WAIT, List.of(), 0);
@@ -2410,7 +2436,7 @@ public class BasicAgent extends Agent {
             if (currentPosition().equals(candidate)) {
                 continue;
             }
-            List<String> path = pathPlanner.findPath(currentPosition(), candidate,
+                List<String> path = findPathForCurrentState(currentPosition(), candidate,
                     blockedPositionsForMovement(), occupiedPositionsForMovement());
             if (!path.isEmpty() && (bestPath.isEmpty() || path.size() < bestPath.size())) {
                 bestPath = path;
@@ -2489,7 +2515,7 @@ public class BasicAgent extends Agent {
         InternalMap.Position target = explorationTargetSelector.selectTarget(internalMap, knownTargets, getName());
         explorationTarget = target;
 
-        List<String> path = pathPlanner.findPath(start, target,
+        List<String> path = findPathForCurrentState(start, target,
             blockedPositionsForMovement(), occupiedPositionsForMovement());
         if (nextMoveIsBlocked(path)) {
             return new Intention(Desire.CLEAR_OBSTACLE, List.of(path.get(0)), 0);
@@ -2534,6 +2560,9 @@ public class BasicAgent extends Agent {
         }
 
         String direction = plan.get(0);
+        if (!isMovementDirection(direction)) {
+            return false;
+        }
         int[] offset = directionOffset(direction);
         int nextX = internalMap.getAgentX() + offset[0];
         int nextY = internalMap.getAgentY() + offset[1];
@@ -2542,6 +2571,11 @@ public class BasicAgent extends Agent {
         return blockedPositionsForMovement().contains(nextPosition)
             || occupiedPositionsForMovement().contains(nextPosition);
     }
+
+            private boolean isMovementDirection(String direction) {
+            return direction.equals("n") || direction.equals("e")
+                || direction.equals("s") || direction.equals("w");
+            }
 
     private InternalMap.Observation findNearestGoalZone() {
         int agentX = internalMap.getAgentX();
@@ -2647,7 +2681,7 @@ public class BasicAgent extends Agent {
                 }
                 case EXPLORE -> {
                     if (explorationTarget != null) {
-                        List<String> path = pathPlanner.findPath(
+                        List<String> path = findPathForCurrentState(
                                 currentPosition(), explorationTarget,
                             blockedPositionsForMovement(),
                             occupiedPositionsForMovement());
@@ -2693,6 +2727,16 @@ public class BasicAgent extends Agent {
         if (currentIntention.desire() == Desire.WAIT) {
             return skip();
         }
+        if (currentIntention.plan().isEmpty()) {
+            return skip();
+        }
+        String currentStep = currentIntention.plan().get(currentIntention.nextAction());
+        if (isBlockActionStep(currentStep)
+                && currentIntention.desire() != Desire.CLEAR_OBSTACLE
+                && currentIntention.desire() != Desire.ADAPT_ROLE
+                && currentIntention.desire() != Desire.SUBMIT) {
+            return executeRetrieveBlock();
+        }
         if (currentIntention.desire() == Desire.CLEAR_OBSTACLE) {
             return executeClear();
         }
@@ -2709,6 +2753,17 @@ public class BasicAgent extends Agent {
             return executeRetrieveBlock();
         }
         return executeMove();
+    }
+
+    private boolean isBlockActionStep(String step) {
+        return step.equals("connect")
+                || step.startsWith("connect:")
+                || step.startsWith("request:")
+                || step.startsWith("attach:")
+                || step.startsWith("detach:")
+                || step.startsWith("submit:")
+                || step.startsWith("rotate:")
+                || step.startsWith("clear:");
     }
 
     private Action executeAdapt() {
