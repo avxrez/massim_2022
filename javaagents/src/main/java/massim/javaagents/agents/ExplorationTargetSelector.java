@@ -94,15 +94,10 @@ public class ExplorationTargetSelector {
                                     String agentName) {
         return knownTargets.entrySet().stream().noneMatch(entry ->
                 distance(target, entry.getValue()) < MIN_TARGET_DISTANCE
-                        && nameNumber(agentName) > nameNumber(entry.getKey()));
+                        && AgentUtils.nameNumber(agentName) > AgentUtils.nameNumber(entry.getKey()));
     }
 
     private int distance(InternalMap.Position first, InternalMap.Position second) {
-        return Math.abs(first.x() - second.x()) + Math.abs(first.y() - second.y());
-    }
-
-    private int nameNumber(String name) {
-        String number = name.replaceAll("[^0-9]", "");
-        return number.isEmpty() ? -1 : Integer.parseInt(number);
+        return AgentUtils.manhattanDistance(first, second);
     }
 }

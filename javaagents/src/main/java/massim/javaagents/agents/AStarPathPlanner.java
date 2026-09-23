@@ -151,7 +151,7 @@ public class AStarPathPlanner {
             }
 
             for (boolean clockwise : List.of(true, false)) {
-                String rotatedDirection = rotateDirection(state.blockDirection(), clockwise);
+                String rotatedDirection = AgentUtils.rotateDirection(state.blockDirection(), clockwise);
                 InternalMap.Position rotatedBlock = offsetPosition(state.position(), rotatedDirection);
                 if (blocked.contains(rotatedBlock)) {
                     continue;
@@ -162,11 +162,11 @@ public class AStarPathPlanner {
                     fallback ? CARRYING_FALLBACK_ROTATION_COST : CARRYING_ROTATION_COST, goal);
             }
 
-            for (String direction : List.of("n", "e", "s", "w")) {
-                if (!oppositeDirection(direction).equals(state.blockDirection())) {
+            for (String direction : AgentUtils.CARDINAL_DIRECTIONS) {
+                if (!AgentUtils.oppositeDirection(direction).equals(state.blockDirection())) {
                     continue;
                 }
-                int[] offset = directionOffset(direction);
+                int[] offset = AgentUtils.directionOffset(direction);
                 InternalMap.Position nextPosition = new InternalMap.Position(
                         state.position().x() + offset[0], state.position().y() + offset[1]);
                 InternalMap.Position nextBlockPosition = offsetPosition(nextPosition, state.blockDirection());
@@ -240,38 +240,8 @@ public class AStarPathPlanner {
     }
 
     private InternalMap.Position offsetPosition(InternalMap.Position position, String direction) {
-        int[] offset = directionOffset(direction);
+        int[] offset = AgentUtils.directionOffset(direction);
         return new InternalMap.Position(position.x() + offset[0], position.y() + offset[1]);
-    }
-
-    private String rotateDirection(String direction, boolean clockwise) {
-        return switch (direction) {
-            case "n" -> clockwise ? "e" : "w";
-            case "e" -> clockwise ? "s" : "n";
-            case "s" -> clockwise ? "w" : "e";
-            case "w" -> clockwise ? "n" : "s";
-            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
-        };
-    }
-
-    private String oppositeDirection(String direction) {
-        return switch (direction) {
-            case "n" -> "s";
-            case "e" -> "w";
-            case "s" -> "n";
-            case "w" -> "e";
-            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
-        };
-    }
-
-    private int[] directionOffset(String direction) {
-        return switch (direction) {
-            case "n" -> new int[]{0, -1};
-            case "e" -> new int[]{1, 0};
-            case "s" -> new int[]{0, 1};
-            case "w" -> new int[]{-1, 0};
-            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
-        };
     }
 
     /**
@@ -331,7 +301,7 @@ public class AStarPathPlanner {
     }
 
     private int heuristic(InternalMap.Position first, InternalMap.Position second) {
-        return Math.abs(first.x() - second.x()) + Math.abs(first.y() - second.y());
+        return AgentUtils.manhattanDistance(first, second);
     }
 
     private boolean insideBounds(InternalMap.Position position,
@@ -361,9 +331,6 @@ public class AStarPathPlanner {
     }
 
     private String directionFrom(InternalMap.Position from, InternalMap.Position to) {
-        if (to.x() > from.x()) return "e";
-        if (to.x() < from.x()) return "w";
-        if (to.y() > from.y()) return "s";
-        return "n";
+        return AgentUtils.directionFrom(from, to);
     }
 }

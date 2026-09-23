@@ -71,7 +71,6 @@ public class BasicAgent extends Agent {
     private String leaderName = "";
     private int lastID = -1;
     private int currentStep = -1;
-    private int taskDeadline = -1;
     private boolean deactivated;
     private String currentRole = "";
     private String currentTask;
@@ -118,8 +117,8 @@ public class BasicAgent extends Agent {
     private final List<TaskInfo> currentTasks = new ArrayList<>();
     private TaskInfo currentTaskInfo;
     private String teamName = "";
-            private final Map<String, Boolean> knownAgentGroupState = new HashMap<>();
-            private final Map<String, String> knownAgentGroupLeader = new HashMap<>();
+    private final Map<String, Boolean> knownAgentGroupState = new HashMap<>();
+    private final Map<String, String> knownAgentGroupLeader = new HashMap<>();
     private final Set<String> currentGroupMembers = new HashSet<>();
     private final Set<String> pendingGroupInvitations = new HashSet<>();
     private final Set<String> rejectedGroupInviteTargets = new HashSet<>();
@@ -130,7 +129,7 @@ public class BasicAgent extends Agent {
     private int currentTaskBlockCount = 1;
     private int desiredGroupSize = 1;
     private String currentGroupLeader = "";
-        private boolean groupLeaderMode = false;
+    private boolean groupLeaderMode = false;
     private boolean groupFormationActive = false;
     private String groupTaskName = "";
     private String deliveryBlockType = null;
@@ -693,14 +692,14 @@ public class BasicAgent extends Agent {
                 currentVisibleThings.add(new VisibleThing(
                         x.getValue().intValue(), y.getValue().intValue(),
                         type.getValue(), details));
-                } else if ((percept.getName().equals("goalZone")
+            } else if ((percept.getName().equals("goalZone")
                     || percept.getName().equals("roleZone"))
                     && percept.getParameters().size() >= 2
                     && percept.getParameters().get(0) instanceof Numeral x
                     && percept.getParameters().get(1) instanceof Numeral y) {
                 currentVisibleThings.add(new VisibleThing(
-                    x.getValue().intValue(), y.getValue().intValue(),
-                    percept.getName(), ""));
+                        x.getValue().intValue(), y.getValue().intValue(),
+                        percept.getName(), ""));
             }
         }
     }
@@ -966,7 +965,6 @@ public class BasicAgent extends Agent {
             } else if (waitingForNextTask || !currentTaskAvailable || !isTaskActive()) {
                 currentTask = null;
                 currentTaskInfo = null;
-                taskDeadline = -1;
                 requiredDispenserTypes.clear();
             }
         }
@@ -975,7 +973,6 @@ public class BasicAgent extends Agent {
             resetGroupStateForNewTask();
             currentTask = null;
             currentTaskInfo = null;
-            taskDeadline = -1;
             requiredDispenserTypes.clear();
             currentTaskBlockCount = 1;
             desiredGroupSize = 1;
@@ -1002,8 +999,7 @@ public class BasicAgent extends Agent {
 
     private void applyTaskInfo(TaskInfo taskInfo) {
         currentTaskInfo = taskInfo;
-        currentTask = taskInfo.name();
-        taskDeadline = taskInfo.deadline();
+        currentTask = taskInfo == null ? null : taskInfo.name();
         requiredDispenserTypes.clear();
         requiredDispenserTypes.addAll(taskInfo.blockTypes());
         taskBlockTypes.clear();
@@ -1023,8 +1019,7 @@ public class BasicAgent extends Agent {
     }
 
     private int nameNumber(String name) {
-        String number = name.replaceAll("[^0-9]", "");
-        return number.isEmpty() ? -1 : Integer.parseInt(number);
+        return AgentUtils.nameNumber(name);
     }
 
     private String serverAgentName(String agentName) {
@@ -1111,7 +1106,7 @@ public class BasicAgent extends Agent {
     }
 
     private boolean isTaskActive() {
-        return taskDeadline < 0 || currentStep <= taskDeadline;
+        return currentTaskInfo == null || currentTaskInfo.deadline() < 0 || currentStep <= currentTaskInfo.deadline();
     }
 
     private void resetGroupStateForNewTask() {
@@ -2454,7 +2449,7 @@ public class BasicAgent extends Agent {
     private String adjacentDirectionTo(InternalMap.Position target) {
         int deltaX = target.x() - internalMap.getAgentX();
         int deltaY = target.y() - internalMap.getAgentY();
-        if (Math.abs(deltaX) + Math.abs(deltaY) != 1) {
+        if (AgentUtils.manhattanDistance(deltaX, deltaY, 0, 0) != 1) {
             return null;
         }
         return directionTo(target, currentPosition());
@@ -2481,19 +2476,13 @@ public class BasicAgent extends Agent {
     }
 
     private String oppositeDirection(String direction) {
-        return switch (direction) {
-            case "n" -> "s";
-            case "e" -> "w";
-            case "s" -> "n";
-            case "w" -> "e";
-            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
-        };
+        return AgentUtils.oppositeDirection(direction);
     }
 
     private String chooseRotationForCarryRecovery(String mirroredSide) {
         String targetDirection = mirroredSide;
         for (boolean clockwise : List.of(true, false)) {
-            String rotated = rotateDirection(retrieveBlockDirection, clockwise);
+            String rotated = AgentUtils.rotateDirection(retrieveBlockDirection, clockwise);
             if (rotated.equals(targetDirection)) {
                 return clockwise ? "cw" : "ccw";
             }
@@ -2502,13 +2491,7 @@ public class BasicAgent extends Agent {
     }
 
     private String rotateDirection(String direction, boolean clockwise) {
-        return switch (direction) {
-            case "n" -> clockwise ? "e" : "w";
-            case "e" -> clockwise ? "s" : "n";
-            case "s" -> clockwise ? "w" : "e";
-            case "w" -> clockwise ? "n" : "s";
-            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
-        };
+        return AgentUtils.rotateDirection(direction, clockwise);
     }
 
     /**
@@ -2566,10 +2549,10 @@ public class BasicAgent extends Agent {
         }
 
         String direction = plan.get(0);
-        if (!isMovementDirection(direction)) {
+        if (!AgentUtils.isMovementDirection(direction)) {
             return false;
         }
-        int[] offset = directionOffset(direction);
+        int[] offset = AgentUtils.directionOffset(direction);
         int nextX = internalMap.getAgentX() + offset[0];
         int nextY = internalMap.getAgentY() + offset[1];
         InternalMap.Position nextPosition = new InternalMap.Position(nextX, nextY);
@@ -2578,10 +2561,9 @@ public class BasicAgent extends Agent {
             || occupiedPositionsForMovement().contains(nextPosition);
     }
 
-            private boolean isMovementDirection(String direction) {
-            return direction.equals("n") || direction.equals("e")
-                || direction.equals("s") || direction.equals("w");
-            }
+    private boolean isMovementDirection(String direction) {
+        return AgentUtils.isMovementDirection(direction);
+    }
 
     private InternalMap.Observation findNearestGoalZone() {
         int agentX = internalMap.getAgentX();
@@ -2703,7 +2685,7 @@ public class BasicAgent extends Agent {
         }
 
     private int distanceTo(int firstX, int firstY, int secondX, int secondY) {
-        return Math.abs(firstX - secondX) + Math.abs(firstY - secondY);
+        return AgentUtils.manhattanDistance(firstX, firstY, secondX, secondY);
     }
 
     // ============================================================
@@ -2939,13 +2921,7 @@ public class BasicAgent extends Agent {
     // ============================================================
 
     private int[] directionOffset(String direction) {
-        return switch (direction) {
-            case "n" -> new int[]{0, -1};
-            case "e" -> new int[]{1, 0};
-            case "s" -> new int[]{0, 1};
-            case "w" -> new int[]{-1, 0};
-            default -> throw new IllegalArgumentException("Invalid direction: " + direction);
-        };
+        return AgentUtils.directionOffset(direction);
     }
 
     private void printGroupState() {
@@ -2962,7 +2938,7 @@ public class BasicAgent extends Agent {
         }
 
         System.out.println(getName() + " GROUP STATE: task=" + currentTask
-                + ", deadline=" + taskDeadline
+                + ", deadline=" + (currentTaskInfo == null ? -1 : currentTaskInfo.deadline())
                 + ", active=" + isTaskActive()
                 + ", groupTask=" + groupTaskName
                 + ", groupLeader=" + currentGroupLeader
