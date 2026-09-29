@@ -20,11 +20,8 @@ import java.util.Set;
  */
 public class AStarPathPlanner {
 
-    /** Search-area margin (in cells) added around start/goal for the obstacle-free search. */
+    /** Search-area margin (in cells) added around start and goal. */
     private static final int MAX_SEARCH_MARGIN = 10;
-
-    /** Search-area margin used for the fallback search that ignores obstacles. */
-    private static final int FALLBACK_SEARCH_MARGIN = 10;
 
     /** Rotation is cheap in the carrying fallback so the agent can re-align the block easily. */
     private static final int CARRYING_ROTATION_COST = 4;
@@ -87,7 +84,7 @@ public class AStarPathPlanner {
         Set<InternalMap.Position> fallbackBlocked = new HashSet<>(occupiedPositions);
         fallbackBlocked.addAll(forbiddenAgentPositions);
         fallbackBlocked.remove(start);
-        List<String> fallbackPath = search(start, goal, fallbackBlocked, FALLBACK_SEARCH_MARGIN);
+        List<String> fallbackPath = search(start, goal, fallbackBlocked, MAX_SEARCH_MARGIN);
         return fallbackPath != null ? fallbackPath : List.of();
     }
 
@@ -137,7 +134,7 @@ public class AStarPathPlanner {
                                                          Set<InternalMap.Position> occupiedPositions,
                                                          Set<InternalMap.Position> forbiddenAgentPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-                                    occupiedPositions, forbiddenAgentPositions, requiredBlockDirection, true, true);
+            occupiedPositions, forbiddenAgentPositions, requiredBlockDirection, true, true);
     }
 
     private List<String> findCarryingPath(InternalMap.Position start,
@@ -161,11 +158,11 @@ public class AStarPathPlanner {
         Map<CarryState, Integer> costs = new HashMap<>();
         Map<CarryState, CarryState> parents = new HashMap<>();
         Map<CarryState, String> actions = new HashMap<>();
-        int margin = fallback ? FALLBACK_SEARCH_MARGIN
+        int margin = fallback ? MAX_SEARCH_MARGIN
             : Math.min(blocked.size() + 1, MAX_SEARCH_MARGIN);
 
         costs.put(startState, 0);
-        open.add(new CarryNode(startState, 0, heuristic(start, goal)));
+        open.add(new CarryNode(startState, 0, AgentUtils.manhattanDistance(start, goal)));
         int minX = Math.min(start.x(), goal.x()) - margin;
         int maxX = Math.max(start.x(), goal.x()) + margin;
         int minY = Math.min(start.y(), goal.y()) - margin;
@@ -179,7 +176,7 @@ public class AStarPathPlanner {
                     ? state.position().equals(goal)
                     && state.blockDirection().equals(requiredBlockDirection)
                     : blockPosition.equals(goal);
-                if (reachedGoal && isCarryGoalValid(state, blocked, occupiedPositions)) {
+                if (reachedGoal && isCarryGoalValid(state, blocked)) {
                 return reconstructCarryingPath(parents, actions, startState, state);
             }
 
@@ -221,11 +218,9 @@ public class AStarPathPlanner {
         return List.of();
     }
 
-    private boolean isCarryGoalValid(CarryState state,
-                                    Set<InternalMap.Position> blocked,
-                                    Set<InternalMap.Position> occupiedPositions) {
+    private boolean isCarryGoalValid(CarryState state, Set<InternalMap.Position> blocked) {
         InternalMap.Position blockPosition = offsetPosition(state.position(), state.blockDirection());
-        return !blocked.contains(blockPosition) && !occupiedPositions.contains(blockPosition);
+        return !blocked.contains(blockPosition);
     }
 
     private void addCarryState(PriorityQueue<CarryNode> open,
@@ -242,8 +237,8 @@ public class AStarPathPlanner {
             costs.put(next, newCost);
             parents.put(next, current);
             actions.put(next, action);
-            open.add(new CarryNode(next, newCost,
-                    newCost + heuristic(next.position(), goal) * 10));
+                open.add(new CarryNode(next, newCost,
+                    newCost + AgentUtils.manhattanDistance(next.position(), goal) * 10));
         }
     }
 
@@ -296,7 +291,7 @@ public class AStarPathPlanner {
         Map<InternalMap.Position, InternalMap.Position> parents = new HashMap<>();
 
         costs.put(start, 0);
-        open.add(new Node(start, 0, heuristic(start, goal)));
+        open.add(new Node(start, 0, AgentUtils.manhattanDistance(start, goal)));
 
         int minX = Math.min(start.x(), goal.x()) - margin;
         int maxX = Math.max(start.x(), goal.x()) + margin;
@@ -319,7 +314,8 @@ public class AStarPathPlanner {
                 if (newCost < costs.getOrDefault(neighbor, Integer.MAX_VALUE)) {
                     costs.put(neighbor, newCost);
                     parents.put(neighbor, current.position());
-                    open.add(new Node(neighbor, newCost, newCost + heuristic(neighbor, goal)));
+                        open.add(new Node(neighbor, newCost,
+                            newCost + AgentUtils.manhattanDistance(neighbor, goal)));
                 }
             }
         }
@@ -333,10 +329,6 @@ public class AStarPathPlanner {
                 new InternalMap.Position(position.x() + 1, position.y()),
                 new InternalMap.Position(position.x(), position.y() + 1),
                 new InternalMap.Position(position.x() - 1, position.y()));
-    }
-
-    private int heuristic(InternalMap.Position first, InternalMap.Position second) {
-        return AgentUtils.manhattanDistance(first, second);
     }
 
     private boolean insideBounds(InternalMap.Position position,
@@ -357,7 +349,7 @@ public class AStarPathPlanner {
             if (parent == null) {
                 return List.of();
             }
-            path.add(directionFrom(parent, current));
+                    path.add(AgentUtils.directionFrom(parent, current));
             current = parent;
         }
 
@@ -365,7 +357,4 @@ public class AStarPathPlanner {
         return path;
     }
 
-    private String directionFrom(InternalMap.Position from, InternalMap.Position to) {
-        return AgentUtils.directionFrom(from, to);
-    }
 }

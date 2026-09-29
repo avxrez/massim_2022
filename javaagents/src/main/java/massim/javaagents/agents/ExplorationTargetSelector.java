@@ -38,10 +38,6 @@ public class ExplorationTargetSelector {
         int agentY = internalMap.getAgentY();
 
         List<InternalMap.Observation> observations = internalMap.getObservations();
-        Set<InternalMap.Position> knownPositions = new HashSet<>();
-        for (InternalMap.Observation observation : observations) {
-            knownPositions.add(new InternalMap.Position(observation.x(), observation.y()));
-        }
         Set<InternalMap.Position> blockedPositions = new HashSet<>(internalMap.getBlockedPositions());
 
         return observations.stream()
@@ -51,7 +47,7 @@ public class ExplorationTargetSelector {
                                 observation.x() + direction.x(),
                                 observation.y() + direction.y())))
                 // Nur unbekannte Felder.
-                .filter(position -> !knownPositions.contains(position))
+                .filter(position -> !internalMap.isKnownPosition(position.x(), position.y()))
                 // Das eigene Feld ist kein Erkundungsziel.
                 .filter(position -> position.x() != agentX || position.y() != agentY)
                 // Nicht direkt auf ein Hindernis gehen.
@@ -60,7 +56,7 @@ public class ExplorationTargetSelector {
                 .filter(position -> isTargetAllowed(position, knownTargets, agentName))
                 // Nächstes unbekanntes Feld auswählen.
                 .min(Comparator.comparingInt(position ->
-                        Math.abs(position.x() - agentX) + Math.abs(position.y() - agentY)))
+                        AgentUtils.manhattanDistance(position.x(), position.y(), agentX, agentY)))
                 // Falls kein Kandidat gefunden wurde: Fallback-Ziel verwenden.
                 .orElseGet(() -> fallbackTarget(internalMap, agentX, agentY, knownTargets, agentName));
     }
@@ -93,11 +89,7 @@ public class ExplorationTargetSelector {
                                     Map<String, InternalMap.Position> knownTargets,
                                     String agentName) {
         return knownTargets.entrySet().stream().noneMatch(entry ->
-                distance(target, entry.getValue()) < MIN_TARGET_DISTANCE
+                                AgentUtils.manhattanDistance(target, entry.getValue()) < MIN_TARGET_DISTANCE
                         && AgentUtils.nameNumber(agentName) > AgentUtils.nameNumber(entry.getKey()));
-    }
-
-    private int distance(InternalMap.Position first, InternalMap.Position second) {
-        return AgentUtils.manhattanDistance(first, second);
     }
 }

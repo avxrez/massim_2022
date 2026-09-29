@@ -8,7 +8,6 @@ import eis.iilang.ParameterList;
 import eis.iilang.Percept;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -223,17 +222,15 @@ public class InternalMap {
             }
         }
 
-        if (vision >= 0) {
-            for (int x = -vision; x <= vision; x++) {
-                for (int y = -vision; y <= vision; y++) {
-                    if (Math.abs(x) + Math.abs(y) <= vision
-                            && !occupiedRelativePositions.contains(new Position(x, y))) {
-                        rememberFreeCell(x, y, step);
-                    }
-                    if (Math.abs(x) + Math.abs(y) <= vision
-                            && !visibleGoalZonePositions.contains(new Position(x, y))) {
-                        removeObservationTypeAt(agentX + x, agentY + y, "goalZone");
-                    }
+        for (int x = -vision; x <= vision; x++) {
+            for (int y = -vision; y <= vision; y++) {
+                if (Math.abs(x) + Math.abs(y) <= vision
+                        && !occupiedRelativePositions.contains(new Position(x, y))) {
+                    rememberFreeCell(x, y, step);
+                }
+                if (Math.abs(x) + Math.abs(y) <= vision
+                        && !visibleGoalZonePositions.contains(new Position(x, y))) {
+                    removeObservationTypeAt(agentX + x, agentY + y, "goalZone");
                 }
             }
         }
@@ -241,11 +238,6 @@ public class InternalMap {
 
     public Set<Position> getVisibleTeammates() {
         return Set.copyOf(visibleTeammates);
-    }
-
-    /** Returns the positions currently occupied by visible entities. */
-    public Set<Position> getOccupiedEntityPositions() {
-        return Set.copyOf(occupiedEntityPositions);
     }
 
     public Set<Position> getPhysicalOccupiedEntityPositions() {
@@ -271,12 +263,8 @@ public class InternalMap {
     public ParameterList toParameterList() {
         ParameterList map = new ParameterList();
         for (Observation observation : observations.values()) {
-            map.add(new Function("observation",
-                    new Identifier(observation.type()),
-                    new Numeral(observation.x()),
-                    new Numeral(observation.y()),
-                    new Identifier(observation.details()),
-                    new Numeral(observation.lastSeenStep())));
+            map.add(observationParameter(observation.type(), observation.x(), observation.y(),
+                observation.details(), observation.lastSeenStep()));
         }
         return map;
     }
@@ -341,7 +329,7 @@ public class InternalMap {
      */
     public List<Observation> getObservations() {
         if (observationsSnapshot == null) {
-            observationsSnapshot = Collections.unmodifiableList(new ArrayList<>(observations.values()));
+            observationsSnapshot = List.copyOf(observations.values());
         }
         return observationsSnapshot;
     }
@@ -391,18 +379,12 @@ public class InternalMap {
         if (blockedPositionsSnapshot == null) {
             Set<Position> blockedPositions = new HashSet<>(occupiedEntityPositions);
             observations.values().stream()
-                .filter(observation -> observation.type().equals("obstacle")
-                || observation.type().equals("failedPath")
-                || observation.type().equals("block"))
+                .filter(observation -> isBlocked(observation.type()))
                 .map(observation -> new Position(observation.x(), observation.y()))
                 .forEach(blockedPositions::add);
             blockedPositionsSnapshot = List.copyOf(blockedPositions);
         }
         return blockedPositionsSnapshot;
-    }
-
-    public List<Position> getPhysicalBlockedPositions() {
-        return getBlockedPositions();
     }
 
     /**
