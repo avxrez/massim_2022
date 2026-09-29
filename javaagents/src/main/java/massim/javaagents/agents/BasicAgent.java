@@ -64,6 +64,7 @@ public class BasicAgent extends Agent {
     private static final int VISION_RANGE = 5;
     private static final int MIN_SHARED_VERIFICATION_THINGS = 3;
     private static final int ROLE_ZONE_MAX_DISTANCE = 20;
+    private static final int GOAL_RESERVATION_MAX_AGE = 2;
     private static final String DEFAULT_ROLE = "default";
     private static final String WORKER_ROLE = "worker";
     private static final String SERVER_AGENT_PREFIX = "agent";
@@ -138,6 +139,8 @@ public class BasicAgent extends Agent {
     private final Set<String> requiredDispenserTypes = new HashSet<>();
     private final Set<InternalMap.Position> assembledBlockPositions = new HashSet<>();
     private final Map<InternalMap.Position, String> assembledBlockTypes = new HashMap<>();
+    private final Map<String, GoalReservationSnapshot> goalReservationSnapshots = new HashMap<>();
+    private final Map<String, Integer> latestGoalReservationRevisions = new HashMap<>();
     private final Map<InternalMap.Position, PendingAssemblyAttachment> pendingAssemblyDeliveries = new HashMap<>();
     private final Set<String> pendingAssemblyDetaches = new HashSet<>();
     private final List<String> attachedBlockDirections = new ArrayList<>();
@@ -169,6 +172,14 @@ public class BasicAgent extends Agent {
         private record PendingAssemblyConnection(String partner, String blockType,
             InternalMap.Position targetPosition, int leaderBlockX, int leaderBlockY) {}
 
+        private record GoalReservationSnapshot(int revision, int updatedAtStep,
+            Set<InternalMap.Position> positions) {
+
+            private GoalReservationSnapshot {
+                positions = Set.copyOf(positions);
+            }
+        }
+
     // ============================================================
     // CURRENT INTENTION
     // ============================================================
@@ -182,6 +193,7 @@ public class BasicAgent extends Agent {
     private String carriedBlockType;
     private boolean blockPlaced;
     private boolean detachRequested;
+    private boolean successorGroupFormationAfterDetach;
     private boolean attachmentCheckPending;
     private boolean explorationFinished;
     private Intention currentIntention;
@@ -269,6 +281,9 @@ public class BasicAgent extends Agent {
             if (message.getParameters().size() > 6) {
                 mergeKnownAgents(message.getParameters().get(6), sender);
             }
+            if (message.getParameters().size() > 9) {
+                mergeGoalReservationSnapshots(message.getParameters().get(9));
+            }
             if (targetX.getValue().intValue() == Integer.MIN_VALUE) {
                 knownTargets.remove(sender);
             } else {
@@ -276,10 +291,10 @@ public class BasicAgent extends Agent {
                         new InternalMap.Position(
                                 targetX.getValue().intValue(), targetY.getValue().intValue()));
             }
-            return;
-                }
+                return;
+            }
 
-        if (message.getName().equals("teammateRequest")
+            if (message.getName().equals("teammateRequest")
                 && message.getParameters().size() >= 5
                 && message.getParameters().get(0) instanceof Numeral x
                 && message.getParameters().get(1) instanceof Numeral y
@@ -884,6 +899,16 @@ public class BasicAgent extends Agent {
             entry.setValue(new InternalMap.Position(
                     position.x() + offsetX, position.y() + offsetY));
         }
+        for (Map.Entry<String, GoalReservationSnapshot> entry : goalReservationSnapshots.entrySet()) {
+            GoalReservationSnapshot snapshot = entry.getValue();
+            Set<InternalMap.Position> translatedPositions = new HashSet<>();
+            for (InternalMap.Position position : snapshot.positions()) {
+                translatedPositions.add(new InternalMap.Position(
+                        position.x() + offsetX, position.y() + offsetY));
+            }
+            entry.setValue(new GoalReservationSnapshot(snapshot.revision(),
+                    snapshot.updatedAtStep(), translatedPositions));
+        }
         if (explorationTarget != null) {
             explorationTarget = new InternalMap.Position(
                     explorationTarget.x() + offsetX, explorationTarget.y() + offsetY);
@@ -979,17 +1004,21 @@ public class BasicAgent extends Agent {
             requiredBlockOffset = null;
             deliveryBlockType = null;
             goalPosition = null;
+            resetRetrieveAssignment();
             resetCarriedBlockTracking();
+            clearPendingActionState();
         } else if (!Objects.equals(currentTask, previousTask)) {
             waitingForNextTask = false;
             resetGroupStateForNewTask();
             deliveryBlockType = null;
             goalPosition = null;
             resetRetrieveAssignment();
+            clearPendingActionState();
         } else if (!isTaskActive()) {
             deliveryBlockType = null;
             goalPosition = null;
             resetRetrieveAssignment();
+            clearPendingActionState();
         }
 
         if (deactivated) {
@@ -1072,7 +1101,8 @@ public class BasicAgent extends Agent {
                 knownAgentsContent,
                 new Identifier(Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
                         ? "grouped" : "free"),
-                new Identifier(knownAgentGroupLeader.getOrDefault(getName(), "")));
+                new Identifier(knownAgentGroupLeader.getOrDefault(getName(), "")),
+                currentGoalReservationParameters());
         for (String agent : knownAgents.keySet()) {
             if (agent.equals(getName())) {
                 continue;
@@ -1083,6 +1113,98 @@ public class BasicAgent extends Agent {
 
     private void sendMergedMapUpdates() {
         sendMapUpdates(mapParameters());
+    }
+
+    private ParameterList currentGoalReservationParameters() {
+        publishOwnGoalReservationSnapshot();
+        expireGoalReservationSnapshots();
+
+        ParameterList reservations = new ParameterList();
+        for (Map.Entry<String, GoalReservationSnapshot> entry : goalReservationSnapshots.entrySet()) {
+            GoalReservationSnapshot snapshot = entry.getValue();
+            ParameterList positions = new ParameterList();
+            for (InternalMap.Position position : snapshot.positions()) {
+                positions.add(new Function("reservedPosition",
+                        new Numeral(position.x()), new Numeral(position.y())));
+            }
+            reservations.add(new Function("goalReservation",
+                    new Identifier(entry.getKey()),
+                    new Numeral(snapshot.revision()),
+                    new Numeral(snapshot.updatedAtStep()),
+                    positions));
+        }
+        return reservations;
+    }
+
+    private void publishOwnGoalReservationSnapshot() {
+        GoalReservationSnapshot ownSnapshot = goalReservationSnapshots.get(getName());
+        if (ownSnapshot != null && currentStep > ownSnapshot.updatedAtStep()) {
+            updateOwnGoalReservationSnapshot(ownSnapshot.positions());
+        }
+    }
+
+    private void mergeGoalReservationSnapshots(Parameter parameter) {
+        if (!(parameter instanceof ParameterList reservations)) {
+            return;
+        }
+        for (Parameter entry : reservations) {
+            if (!(entry instanceof Function reservation)
+                    || !reservation.getName().equals("goalReservation")
+                    || reservation.getParameters().size() < 4
+                    || !(reservation.getParameters().get(0) instanceof Identifier owner)
+                    || !(reservation.getParameters().get(1) instanceof Numeral revision)
+                    || !(reservation.getParameters().get(2) instanceof Numeral updatedAtStep)
+                    || !(reservation.getParameters().get(3) instanceof ParameterList positions)
+                    || owner.getValue().equals(getName())) {
+                continue;
+            }
+
+            String ownerName = owner.getValue();
+            int snapshotRevision = revision.getValue().intValue();
+            if (snapshotRevision <= latestGoalReservationRevisions.getOrDefault(ownerName, 0)) {
+                continue;
+            }
+
+            Set<InternalMap.Position> reservedPositions = new HashSet<>();
+            for (Parameter position : positions) {
+                if (position instanceof Function reservedPosition
+                        && reservedPosition.getName().equals("reservedPosition")
+                        && reservedPosition.getParameters().size() >= 2
+                        && reservedPosition.getParameters().get(0) instanceof Numeral x
+                        && reservedPosition.getParameters().get(1) instanceof Numeral y) {
+                    reservedPositions.add(new InternalMap.Position(
+                            x.getValue().intValue(), y.getValue().intValue()));
+                }
+            }
+
+            int snapshotStep = updatedAtStep.getValue().intValue();
+            latestGoalReservationRevisions.put(ownerName, snapshotRevision);
+            GoalReservationSnapshot snapshot = new GoalReservationSnapshot(
+                    snapshotRevision, snapshotStep, reservedPositions);
+            if (isGoalReservationSnapshotFresh(snapshot)) {
+                goalReservationSnapshots.put(ownerName, snapshot);
+            } else {
+                goalReservationSnapshots.remove(ownerName);
+            }
+        }
+    }
+
+    private void updateOwnGoalReservationSnapshot(Set<InternalMap.Position> positions) {
+        int revision = latestGoalReservationRevisions.getOrDefault(getName(), 0) + 1;
+        latestGoalReservationRevisions.put(getName(), revision);
+        goalReservationSnapshots.put(getName(),
+                new GoalReservationSnapshot(revision, currentStep, positions));
+    }
+
+    private void expireGoalReservationSnapshots() {
+        goalReservationSnapshots.entrySet().removeIf(entry ->
+                !entry.getKey().equals(getName())
+                        && !isGoalReservationSnapshotFresh(entry.getValue()));
+    }
+
+    private boolean isGoalReservationSnapshotFresh(GoalReservationSnapshot snapshot) {
+        return currentStep < 0
+                || currentStep - snapshot.updatedAtStep() <= GOAL_RESERVATION_MAX_AGE;
     }
 
     private int calculateDesiredGroupSize() {
@@ -1142,6 +1264,12 @@ public class BasicAgent extends Agent {
     }
 
     private void startGroupFormationAsSuccessor() {
+        if (isCarryingBlock()) {
+            successorGroupFormationAfterDetach = true;
+            detachRequested = true;
+            currentIntention = null;
+            return;
+        }
         startGroupFormationCore();
     }
 
@@ -1205,6 +1333,7 @@ public class BasicAgent extends Agent {
         currentGroupMembers.clear();
         currentGroupMembers.add(getName());
         goalPosition = new InternalMap.Position(selectedGoalZone.x(), selectedGoalZone.y());
+        reserveGroupGoalPositions(goalPosition);
         groupGoalZoneConfirmed = true;
         knownAgentGroupState.put(getName(), true);
         knownAgentGroupLeader.put(getName(), getName());
@@ -1308,6 +1437,7 @@ public class BasicAgent extends Agent {
         clearAssemblyState();
 
         goalPosition = leaderGoalAnchor;
+        reserveGroupGoalPositions(leaderGoalAnchor);
         groupGoalZoneConfirmed = isKnownGoalZone(leaderGoalAnchor);
         currentIntention = null;
 
@@ -1510,6 +1640,7 @@ public class BasicAgent extends Agent {
     }
 
     private void clearRetrieveAssignmentState() {
+        releaseGroupGoalPositions();
         deliveryBlockType = null;
         goalPosition = null;
         pendingAssemblyAttachment = null;
@@ -1547,6 +1678,20 @@ public class BasicAgent extends Agent {
         }
         assemblyCleanupRequested = false;
         clearRetrieveAssignmentState();
+        for (String member : new ArrayList<>(deferredGroupDissolveMembers)) {
+            sendMessage(new Percept("groupDissolve"), member, getName());
+        }
+        deferredGroupDissolveMembers.clear();
+    }
+
+    private void finishAssemblyAfterSuccessfulSubmit() {
+        assemblyCleanupRequested = false;
+        attachedBlockDirections.clear();
+        pendingAssemblyDetaches.clear();
+        detachRequested = false;
+        successorGroupFormationAfterDetach = false;
+        clearRetrieveAssignmentState();
+        resetCarriedBlockTracking();
         for (String member : new ArrayList<>(deferredGroupDissolveMembers)) {
             sendMessage(new Percept("groupDissolve"), member, getName());
         }
@@ -1781,6 +1926,10 @@ public class BasicAgent extends Agent {
                 }
                 resetCarriedBlockTracking();
                 currentIntention = null;
+                if (successorGroupFormationAfterDetach) {
+                    successorGroupFormationAfterDetach = false;
+                    startGroupFormationCore();
+                }
                 if (deliveryBlockType != null && currentGroupLeader != null
                         && !currentGroupLeader.isEmpty()) {
                     System.out.println(getName() + " detached successfully and resumes retrieving "
@@ -1789,7 +1938,7 @@ public class BasicAgent extends Agent {
             } else if ("submit".equals(lastAction)) {
                 System.out.println(getName() + " submitted completed task " + currentTask
                         + "; resetting assembly map");
-                resetRetrieveAssignment();
+                finishAssemblyAfterSuccessfulSubmit();
                 waitingForNextTask = true;
             }
         } else {
@@ -1883,9 +2032,17 @@ public class BasicAgent extends Agent {
         blockRetrieved = false;
         carriedBlockType = null;
         blockPlaced = false;
+        detachRequested = false;
         attachmentCheckPending = false;
         carriedBlockPosition = null;
         retrieveBlockDirection = null;
+    }
+
+    private void clearPendingActionState() {
+        pendingAction = null;
+        pendingDirection = null;
+        pendingRotation = null;
+        clearDirection = null;
     }
 
     private void prepareForBlockAssignment() {
@@ -2257,9 +2414,10 @@ public class BasicAgent extends Agent {
             Set<InternalMap.Position> occupiedPositions) {
         if (isCarryingBlock()) {
             return pathPlanner.findCarryingPath(start, goal, retrieveBlockDirection,
-                    blockedPositions, occupiedPositions);
+                blockedPositions, occupiedPositions, reservedGoalPositionsForMovement());
         }
-        return pathPlanner.findPath(start, goal, blockedPositions, occupiedPositions);
+        return pathPlanner.findPath(start, goal, blockedPositions, occupiedPositions,
+            reservedGoalPositionsForMovement());
     }
 
     private List<String> findPathForCurrentState(InternalMap.Position start,
@@ -2269,7 +2427,7 @@ public class BasicAgent extends Agent {
         if (isCarryingBlock() && requiredBlockDirection != null) {
             return pathPlanner.findCarryingPathToAgentPosition(start, goal,
                     retrieveBlockDirection, requiredBlockDirection,
-                    blockedPositions, occupiedPositions);
+                    blockedPositions, occupiedPositions, reservedGoalPositionsForMovement());
         }
         return findPathForCurrentState(start, goal, blockedPositions, occupiedPositions);
     }
@@ -2289,6 +2447,7 @@ public class BasicAgent extends Agent {
                 .filter(observation -> observation.type().equals("goalZone"))
                 .map(observation -> new InternalMap.Position(observation.x(), observation.y()))
                 .filter(candidate -> !candidate.equals(currentTarget))
+                .filter(this::isGoalReservationAvailable)
                 .filter(candidate -> !isPhysicallyOccupied(candidate))
                 .filter(candidate -> pathExists(findPathForCurrentState(start, candidate,
                         blockedPositionsForMovement(), occupiedPositionsForMovement())))
@@ -2310,6 +2469,52 @@ public class BasicAgent extends Agent {
         assembledBlockTypes.clear();
         pendingAssemblyDetaches.clear();
         pendingAssemblyConnection = null;
+    }
+
+    private void reserveGroupGoalPositions(InternalMap.Position assemblyAnchor) {
+        releaseGroupGoalPositions();
+        if (!isCurrentGroupLeader()) {
+            return;
+        }
+
+        Set<InternalMap.Position> positions = new HashSet<>();
+        positions.add(assemblyAnchor);
+        for (InternalMap.Position offset : taskRequirementOffsets) {
+            positions.add(new InternalMap.Position(
+                    assemblyAnchor.x() + offset.x(), assemblyAnchor.y() + offset.y()));
+        }
+        updateOwnGoalReservationSnapshot(positions);
+    }
+
+    private void releaseGroupGoalPositions() {
+        GoalReservationSnapshot ownSnapshot = goalReservationSnapshots.get(getName());
+        if (ownSnapshot != null && !ownSnapshot.positions().isEmpty()) {
+            updateOwnGoalReservationSnapshot(Set.of());
+        }
+    }
+
+    private boolean isReservedForAnotherLeader(InternalMap.Position position) {
+        for (Map.Entry<String, GoalReservationSnapshot> entry : goalReservationSnapshots.entrySet()) {
+            if (!entry.getKey().equals(getName())
+                    && isGoalReservationSnapshotFresh(entry.getValue())
+                    && entry.getValue().positions().contains(position)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isGoalReservationAvailable(InternalMap.Position assemblyAnchor) {
+        if (isReservedForAnotherLeader(assemblyAnchor)) {
+            return false;
+        }
+        for (InternalMap.Position offset : taskRequirementOffsets) {
+            if (isReservedForAnotherLeader(new InternalMap.Position(
+                    assemblyAnchor.x() + offset.x(), assemblyAnchor.y() + offset.y()))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Intention createRetrieveBlockIntention() {
@@ -2404,6 +2609,9 @@ public class BasicAgent extends Agent {
     }
 
     private String detachDirection() {
+        if (!blockRetrieved) {
+            return null;
+        }
         if (retrieveBlockDirection != null) {
             return retrieveBlockDirection;
         }
@@ -2533,6 +2741,17 @@ public class BasicAgent extends Agent {
         return occupied;
     }
 
+    private Set<InternalMap.Position> reservedGoalPositionsForMovement() {
+        Set<InternalMap.Position> reserved = new HashSet<>();
+        for (Map.Entry<String, GoalReservationSnapshot> entry : goalReservationSnapshots.entrySet()) {
+            if (!entry.getKey().equals(getName())
+                    && isGoalReservationSnapshotFresh(entry.getValue())) {
+                reserved.addAll(entry.getValue().positions());
+            }
+        }
+        return reserved;
+    }
+
     private boolean isCurrentGroupLeader() {
         return groupLeaderMode || getName().equals(currentGroupLeader);
     }
@@ -2558,7 +2777,8 @@ public class BasicAgent extends Agent {
         InternalMap.Position nextPosition = new InternalMap.Position(nextX, nextY);
 
         return blockedPositionsForMovement().contains(nextPosition)
-            || occupiedPositionsForMovement().contains(nextPosition);
+            || occupiedPositionsForMovement().contains(nextPosition)
+            || reservedGoalPositionsForMovement().contains(nextPosition);
     }
 
     private boolean isMovementDirection(String direction) {
@@ -2571,6 +2791,8 @@ public class BasicAgent extends Agent {
 
         return internalMap.getObservations().stream()
                 .filter(observation -> observation.type().equals("goalZone"))
+                .filter(observation -> isGoalReservationAvailable(
+                    new InternalMap.Position(observation.x(), observation.y())))
                 .min((first, second) -> Integer.compare(
                         distanceTo(first.x(), first.y(), agentX, agentY),
                         distanceTo(second.x(), second.y(), agentX, agentY)))
@@ -2592,7 +2814,8 @@ public class BasicAgent extends Agent {
 
             private boolean isOccupiedByAnotherAgent(int x, int y) {
             return (x != internalMap.getAgentX() || y != internalMap.getAgentY())
-                && occupiedPositionsForMovement().contains(new InternalMap.Position(x, y));
+                        && (occupiedPositionsForMovement().contains(new InternalMap.Position(x, y))
+                            || reservedGoalPositionsForMovement().contains(new InternalMap.Position(x, y)));
             }
 
             private boolean isAtRoleZone() {
@@ -2775,6 +2998,13 @@ public class BasicAgent extends Agent {
             return skip();
         }
         String direction = currentIntention.plan().get(currentIntention.nextAction());
+        int[] offset = directionOffset(direction);
+        InternalMap.Position nextPosition = new InternalMap.Position(
+                internalMap.getAgentX() + offset[0], internalMap.getAgentY() + offset[1]);
+        if (isReservedForAnotherLeader(nextPosition)) {
+            currentIntention = null;
+            return skip();
+        }
         if (nextMoveIsBlocked(List.of(direction))) {
             currentIntention = new Intention(
                     Desire.CLEAR_OBSTACLE, List.of(direction), 0);

@@ -32,14 +32,14 @@
     }
   },
 
-  "blockTypes" : [2, 2],
+  "blockTypes" : [3, 3],
   "dispensers" : [5, 10],
 
   "tasks" : {
-    "size" : [1, 3],
-    "concurrent" : 2,
-    "iterations" : [10, 12],
-    "maxDuration" : [50, 100]
+    "size" : [1, 4],
+    "concurrent" : 1,
+    "iterations" : [2, 5],
+    "maxDuration" : [100, 200]
   },
 
   "events" : {

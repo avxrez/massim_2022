@@ -56,15 +56,24 @@ public class AStarPathPlanner {
     public List<String> findPath(InternalMap.Position start,
                                   InternalMap.Position goal,
                                   List<InternalMap.Position> blockedPositions) {
-        return findPath(start, goal, blockedPositions, Set.of());
+        return findPath(start, goal, blockedPositions, Set.of(), Set.of());
     }
 
     public List<String> findPath(InternalMap.Position start,
                                  InternalMap.Position goal,
                                  List<InternalMap.Position> blockedPositions,
                                  Set<InternalMap.Position> occupiedPositions) {
+        return findPath(start, goal, blockedPositions, occupiedPositions, Set.of());
+    }
+
+    public List<String> findPath(InternalMap.Position start,
+                                 InternalMap.Position goal,
+                                 List<InternalMap.Position> blockedPositions,
+                                 Set<InternalMap.Position> occupiedPositions,
+                                 Set<InternalMap.Position> forbiddenAgentPositions) {
         Set<InternalMap.Position> blocked = new HashSet<>(blockedPositions);
         blocked.addAll(occupiedPositions);
+        blocked.addAll(forbiddenAgentPositions);
         blocked.remove(start);
 
         int margin = Math.min(blocked.size() + 1, MAX_SEARCH_MARGIN);
@@ -76,6 +85,7 @@ public class AStarPathPlanner {
         // Kein hindernisfreier Pfad gefunden: Notfallpfad berechnen, der
         // Hindernisse ignoriert, damit der Agent trotzdem eine Richtung hat.
         Set<InternalMap.Position> fallbackBlocked = new HashSet<>(occupiedPositions);
+        fallbackBlocked.addAll(forbiddenAgentPositions);
         fallbackBlocked.remove(start);
         List<String> fallbackPath = search(start, goal, fallbackBlocked, FALLBACK_SEARCH_MARGIN);
         return fallbackPath != null ? fallbackPath : List.of();
@@ -86,8 +96,7 @@ public class AStarPathPlanner {
                                           InternalMap.Position goal,
                                           String blockDirection,
                                           List<InternalMap.Position> blockedPositions) {
-        return findCarryingPath(start, goal, blockDirection, blockedPositions,
-            Set.of(), null, false, true);
+        return findCarryingPath(start, goal, blockDirection, blockedPositions, Set.of());
     }
 
     public List<String> findCarryingPath(InternalMap.Position start,
@@ -95,8 +104,18 @@ public class AStarPathPlanner {
                                          String blockDirection,
                                          List<InternalMap.Position> blockedPositions,
                                          Set<InternalMap.Position> occupiedPositions) {
+                        return findCarryingPath(start, goal, blockDirection, blockedPositions,
+                            occupiedPositions, Set.of());
+                        }
+
+                        public List<String> findCarryingPath(InternalMap.Position start,
+                                         InternalMap.Position goal,
+                                         String blockDirection,
+                                         List<InternalMap.Position> blockedPositions,
+                                         Set<InternalMap.Position> occupiedPositions,
+                                         Set<InternalMap.Position> forbiddenAgentPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-            occupiedPositions, null, false, true);
+                            occupiedPositions, forbiddenAgentPositions, null, false, true);
     }
 
     /** Finds a carrying path that ends with the agent at the goal and the block at the required side. */
@@ -106,8 +125,19 @@ public class AStarPathPlanner {
                                                          String requiredBlockDirection,
                                                          List<InternalMap.Position> blockedPositions,
                                                          Set<InternalMap.Position> occupiedPositions) {
+                                return findCarryingPathToAgentPosition(start, goal, blockDirection,
+                                    requiredBlockDirection, blockedPositions, occupiedPositions, Set.of());
+                                }
+
+                                public List<String> findCarryingPathToAgentPosition(InternalMap.Position start,
+                                                         InternalMap.Position goal,
+                                                         String blockDirection,
+                                                         String requiredBlockDirection,
+                                                         List<InternalMap.Position> blockedPositions,
+                                                         Set<InternalMap.Position> occupiedPositions,
+                                                         Set<InternalMap.Position> forbiddenAgentPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-            occupiedPositions, requiredBlockDirection, true, true);
+                                    occupiedPositions, forbiddenAgentPositions, requiredBlockDirection, true, true);
     }
 
     private List<String> findCarryingPath(InternalMap.Position start,
@@ -115,6 +145,7 @@ public class AStarPathPlanner {
                                            String blockDirection,
                                            List<InternalMap.Position> blockedPositions,
                                            Set<InternalMap.Position> occupiedPositions,
+                                           Set<InternalMap.Position> forbiddenAgentPositions,
                                            String requiredBlockDirection,
                                            boolean goalIsAgentPosition,
                                            boolean fallback) {
@@ -122,6 +153,8 @@ public class AStarPathPlanner {
                     ? new HashSet<>() : new HashSet<>(blockedPositions);
         blocked.addAll(occupiedPositions);
         blocked.remove(start);
+        Set<InternalMap.Position> forbiddenForAgent = new HashSet<>(forbiddenAgentPositions);
+        forbiddenForAgent.remove(start);
         CarryState startState = new CarryState(start, blockDirection, null);
         PriorityQueue<CarryNode> open = new PriorityQueue<>(
                 Comparator.comparingInt(CarryNode::estimate).thenComparingInt(CarryNode::cost));
@@ -171,7 +204,8 @@ public class AStarPathPlanner {
                         state.position().x() + offset[0], state.position().y() + offset[1]);
                 InternalMap.Position nextBlockPosition = offsetPosition(nextPosition, state.blockDirection());
                 if (!insideBounds(nextPosition, minX, maxX, minY, maxY)
-                        || blocked.contains(nextPosition) || blocked.contains(nextBlockPosition)) {
+                    || blocked.contains(nextPosition) || forbiddenForAgent.contains(nextPosition)
+                    || blocked.contains(nextBlockPosition)) {
                     continue;
                 }
                 CarryState next = new CarryState(nextPosition, state.blockDirection(), direction);
@@ -181,7 +215,8 @@ public class AStarPathPlanner {
         }
         if (!fallback && !blocked.isEmpty()) {
             return findCarryingPath(start, goal, blockDirection, List.of(),
-                occupiedPositions, requiredBlockDirection, goalIsAgentPosition, true);
+                occupiedPositions, forbiddenAgentPositions,
+                requiredBlockDirection, goalIsAgentPosition, true);
         }
         return List.of();
     }
