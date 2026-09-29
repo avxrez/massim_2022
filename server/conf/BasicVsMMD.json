@@ -1,0 +1,26 @@
+{
+  "server": {
+    "tournamentMode": "manual",
+    "teamsPerMatch": 2,
+    "launch": "key",
+    "port": 12300,
+    "backlog": 10000,
+    "agentTimeout": 4000,
+    "resultPath": "results",
+    "logLevel": "normal",
+    "logPath": "logs",
+    "replayPath": "replays",
+    "maxPacketLength": 65536,
+    "waitBetweenSimulations": 5000
+  },
+  "manual-mode": [
+    ["A", "MMD"]
+  ],
+  "match": [
+    "$(sim/basic-vs-mmd.json)"
+  ],
+  "teams": {
+    "A": {"prefix": "agent", "password": "1"},
+    "MMD": {"prefix": "agent", "password": "1"}
+  }
+}

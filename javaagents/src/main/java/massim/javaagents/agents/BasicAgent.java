@@ -2669,6 +2669,12 @@ public class BasicAgent extends Agent {
                 }
                 case EXPLORE -> {
                     if (explorationTarget != null) {
+                        if (internalMap.isKnownPosition(
+                                explorationTarget.x(), explorationTarget.y())) {
+                            explorationTarget = null;
+                            currentIntention = null;
+                            return;
+                        }
                         List<String> path = findPathForCurrentState(
                                 currentPosition(), explorationTarget,
                             blockedPositionsForMovement(),
