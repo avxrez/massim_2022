@@ -132,7 +132,6 @@ public class BasicAgent extends Agent {
     private final Set<String> pendingGroupInvitations = new HashSet<>();
     private final Set<String> rejectedGroupInviteTargets = new HashSet<>();
     private String currentGroupInviteTarget = null;
-    private boolean groupInviteRetryRequested = false;
     private boolean waitingForNextTask = false;
     private boolean groupGoalZoneConfirmed = false;
     private int currentTaskBlockCount = 1;
@@ -202,7 +201,6 @@ public class BasicAgent extends Agent {
     private boolean blockPlaced;
     private boolean detachRequested;
     private boolean successorGroupFormationAfterDetach;
-    private boolean attachmentCheckPending;
     private boolean explorationFinished;
     private Intention currentIntention;
     private String pendingAction;
@@ -432,16 +430,13 @@ public class BasicAgent extends Agent {
             pendingGroupInvitations.remove(rejectedAgent.getValue());
             currentGroupInviteTarget = null;
             rejectedGroupInviteTargets.add(rejectedAgent.getValue());
-            if (currentGroupMembers.size() < desiredGroupSize) {
-                groupInviteRetryRequested = true;
-            }
             return;
         }
 
         if (message.getName().equals("groupJoinAccepted")
                 && message.getParameters().size() >= 2
                 && message.getParameters().get(0) instanceof Identifier agent
-                && message.getParameters().get(1) instanceof Identifier task
+            && message.getParameters().get(1) instanceof Identifier
                 && groupLeaderMode) {
             pendingGroupInvitations.remove(agent.getValue());
             currentGroupInviteTarget = null;
@@ -450,8 +445,6 @@ public class BasicAgent extends Agent {
             currentGroupMembers.add(agent.getValue());
             if (currentGroupMembers.size() >= desiredGroupSize) {
                 recruitNextGroupLeader();
-            } else {
-                groupInviteRetryRequested = true;
             }
             return;
         }
@@ -1185,19 +1178,6 @@ public class BasicAgent extends Agent {
         return currentTaskBlockCount + 1;
     }
 
-    static boolean hasAllRequiredBlockTypes(List<String> availableBlockTypes, List<String> requiredBlockTypes) {
-        if (requiredBlockTypes == null || requiredBlockTypes.isEmpty()) {
-            return true;
-        }
-        Set<String> available = new HashSet<>(availableBlockTypes);
-        for (String requiredType : requiredBlockTypes) {
-            if (!available.contains(requiredType)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     private boolean isTaskActive() {
         return currentTaskInfo == null || currentTaskInfo.deadline() < 0 || currentStep <= currentTaskInfo.deadline();
     }
@@ -1220,7 +1200,6 @@ public class BasicAgent extends Agent {
         currentGroupMembers.clear();
         pendingGroupInvitations.clear();
         currentGroupInviteTarget = null;
-        groupInviteRetryRequested = false;
         groupLeaderMode = false;
         groupFormationActive = false;
         currentGroupLeader = "";
@@ -1570,7 +1549,6 @@ public class BasicAgent extends Agent {
         pendingGroupInvitations.clear();
         rejectedGroupInviteTargets.clear();
         currentGroupInviteTarget = null;
-        groupInviteRetryRequested = false;
         groupLeaderMode = false;
         groupFormationActive = false;
         currentGroupLeader = "";
@@ -1599,7 +1577,6 @@ public class BasicAgent extends Agent {
         } else {
             blockRequested = false;
             blockPlaced = false;
-            attachmentCheckPending = false;
         }
     }
 
@@ -1680,7 +1657,6 @@ public class BasicAgent extends Agent {
                 && currentGroupMembers.size() < desiredGroupSize
                 && currentGroupInviteTarget == null
                 && pendingGroupInvitations.isEmpty()) {
-            groupInviteRetryRequested = false;
             inviteKnownAgentsToGroup();
         }
 
@@ -1715,7 +1691,6 @@ public class BasicAgent extends Agent {
             currentGroupMembers.clear();
             pendingGroupInvitations.clear();
             currentGroupInviteTarget = null;
-            groupInviteRetryRequested = false;
             groupFormationActive = false;
             currentGroupLeader = "";
             groupTaskName = "";
@@ -1785,13 +1760,6 @@ public class BasicAgent extends Agent {
             // Action succeeded.
             currentIntention = currentIntention.advance();
 
-                if ("clear".equals(lastAction)
-                    && "failed_target".equals(lastActionResult)
-                    && clearDirection != null) {
-                int[] offset = directionOffset(clearDirection);
-                internalMap.forgetObservationsAt(
-                        internalMap.getAgentX() + offset[0], internalMap.getAgentY() + offset[1]);
-            }
             if ("request".equals(lastAction)) {
                 blockRequested = true;
             } else if ("clear".equals(lastAction)) {
@@ -1828,7 +1796,6 @@ public class BasicAgent extends Agent {
                 if (isAssemblyLeader() && retrieveBlockDirection != null) {
                     attachedBlockDirections.add(retrieveBlockDirection);
                 }
-                attachmentCheckPending = true;
             } else if ("connect".equals(lastAction)
                     && pendingAssemblyConnection != null) {
                 if (isCurrentGroupLeader()
@@ -1946,7 +1913,6 @@ public class BasicAgent extends Agent {
         if (!blockRetrieved || retrieveBlockDirection == null) {
             return;
         }
-        attachmentCheckPending = false;
 
         InternalMap.Position attachedPosition = findAttachedBlockPosition(percepts, retrieveBlockDirection);
         if (attachedPosition == null) {
@@ -1966,7 +1932,6 @@ public class BasicAgent extends Agent {
         carriedBlockType = null;
         blockPlaced = false;
         detachRequested = false;
-        attachmentCheckPending = false;
         carriedBlockPosition = null;
         retrieveBlockDirection = null;
     }
@@ -2499,7 +2464,7 @@ public class BasicAgent extends Agent {
             return new Intention(Desire.RETRIEVE_BLOCK, path, 0);
         }
 
-        if (deliveryTarget != null && carriedBlockPosition != null && carriedBlockPosition.equals(deliveryTarget)) {
+        if (carriedBlockPosition != null && carriedBlockPosition.equals(deliveryTarget)) {
             if (!currentGroupLeader.isEmpty() && !currentGroupLeader.equals(getName())) {
                 sendMessage(new Percept("groupBlockDelivered",
                         new Identifier(deliveryBlockType),
@@ -3034,10 +2999,6 @@ public class BasicAgent extends Agent {
     private Action skip() {
         return new Action("skip", new Numeral(0), new Numeral(-1));
     }
-
-    // ============================================================
-    // UTILITY
-    // ============================================================
 
     // ============================================================
     // BDI CYCLE

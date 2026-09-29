@@ -70,11 +70,6 @@ public class InternalMap {
         return agentY;
     }
 
-    public void setAgentPosition(int agentX, int agentY) {
-        this.agentX = agentX;
-        this.agentY = agentY;
-    }
-
     /**
      * Aktualisiert die Position des Agenten nach einer erfolgreichen Bewegung.
      */

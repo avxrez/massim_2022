@@ -176,7 +176,7 @@ public class AStarPathPlanner {
                     ? state.position().equals(goal)
                     && state.blockDirection().equals(requiredBlockDirection)
                     : blockPosition.equals(goal);
-                if (reachedGoal && isCarryGoalValid(state, blocked)) {
+                if (reachedGoal && !blocked.contains(blockPosition)) {
                 return reconstructCarryingPath(parents, actions, startState, state);
             }
 
@@ -216,11 +216,6 @@ public class AStarPathPlanner {
                 requiredBlockDirection, goalIsAgentPosition, true);
         }
         return List.of();
-    }
-
-    private boolean isCarryGoalValid(CarryState state, Set<InternalMap.Position> blocked) {
-        InternalMap.Position blockPosition = offsetPosition(state.position(), state.blockDirection());
-        return !blocked.contains(blockPosition);
     }
 
     private void addCarryState(PriorityQueue<CarryNode> open,
