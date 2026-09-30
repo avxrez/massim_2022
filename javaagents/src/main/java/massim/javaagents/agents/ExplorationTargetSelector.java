@@ -6,6 +6,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Selects unexplored targets while keeping agents from repeatedly exploring
+ * the same part of the map.
+ */
 public class ExplorationTargetSelector {
 
     private static final int MIN_TARGET_DISTANCE = 30;
@@ -17,7 +21,16 @@ public class ExplorationTargetSelector {
             new InternalMap.Position(-1, 0)
     );
 
-    public InternalMap.Position selectTarget(InternalMap internalMap,
+        /**
+         * Selects the nearest eligible frontier next to a known observation.
+         * If no such frontier exists, returns a distant fallback target.
+         *
+         * @param internalMap current map and agent position
+         * @param knownTargets targets currently assigned to other agents
+         * @param agentName name used to resolve target ownership priority
+         * @return an unexplored target position
+         */
+        public InternalMap.Position selectTarget(InternalMap internalMap,
             Map<String, InternalMap.Position> knownTargets,
             String agentName) {
         int agentX = internalMap.getAgentX();
@@ -40,7 +53,17 @@ public class ExplorationTargetSelector {
                 .orElseGet(() -> fallbackTarget(internalMap, agentX, agentY, knownTargets, agentName));
     }
 
-    private InternalMap.Position fallbackTarget(InternalMap internalMap,
+        /**
+         * Finds a distant target when all nearby frontiers are known or reserved.
+         *
+         * @param internalMap current map
+         * @param agentX current agent x-coordinate
+         * @param agentY current agent y-coordinate
+         * @param knownTargets targets assigned to other agents
+         * @param agentName name used to resolve target ownership priority
+         * @return a target outside the known map and other agents' protected ranges
+         */
+        private InternalMap.Position fallbackTarget(InternalMap internalMap,
             int agentX,
             int agentY,
             Map<String, InternalMap.Position> knownTargets,
@@ -55,7 +78,16 @@ public class ExplorationTargetSelector {
         return target;
     }
 
-    public boolean isTargetAllowed(InternalMap.Position target,
+        /**
+         * Checks whether a target is outside the exclusion range of higher-priority
+         * known agents.
+         *
+         * @param target candidate target position
+         * @param knownTargets targets assigned to other agents
+         * @param agentName name used to determine this agent's priority
+         * @return {@code true} if this agent may use the target
+         */
+        public boolean isTargetAllowed(InternalMap.Position target,
             Map<String, InternalMap.Position> knownTargets,
             String agentName) {
         return knownTargets.entrySet().stream().noneMatch(entry ->

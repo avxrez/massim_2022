@@ -14,6 +14,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Stores the agent's observations in a shared absolute coordinate system and
+ * tracks transient occupancy and teammate visibility for the current step.
+ */
 public class InternalMap {
 
     private static final int DEFAULT_VISION = 5;
@@ -33,20 +37,43 @@ public class InternalMap {
 
     private final Set<Position> visibleTeammates = new HashSet<>();
 
+    /**
+     * An observed map feature, located in absolute coordinates.
+     *
+     * @param type feature type
+     * @param x absolute x-coordinate
+     * @param y absolute y-coordinate
+     * @param details feature-specific details
+     * @param lastSeenStep simulation step of the latest observation
+     */
     public record Observation(String type, int x, int y, String details, int lastSeenStep) {}
 
+    /**
+     * A position in the shared absolute coordinate system.
+     *
+     * @param x absolute x-coordinate
+     * @param y absolute y-coordinate
+     */
     public record Position(int x, int y) {}
 
     private record ObservationKey(String type, int x, int y, String details) {}
 
+    /** @return the agent's current absolute x-coordinate */
     public int getAgentX() {
         return agentX;
     }
 
+    /** @return the agent's current absolute y-coordinate */
     public int getAgentY() {
         return agentY;
     }
 
+    /**
+     * Moves the internal agent position by one cell.
+     *
+     * @param direction cardinal direction: {@code n}, {@code e}, {@code s}, or {@code w}
+     * @throws IllegalArgumentException if the direction is not cardinal
+     */
     public void updateAgentPosition(String direction) {
         switch (direction) {
             case "n" -> agentY--;
@@ -57,6 +84,11 @@ public class InternalMap {
         }
     }
 
+    /**
+     * Applies the position change reported by a successful move action.
+     *
+     * @param percepts percepts describing the last action and its parameters
+     */
     public void updateAgentPositionFromPercepts(List<Percept> percepts) {
         String lastAction = null;
         String lastActionResult = null;
@@ -83,6 +115,16 @@ public class InternalMap {
         }
     }
 
+    /**
+     * Stores an observation at an offset from the agent's current position.
+     * Conflicting observations at that cell are replaced, except for zone data.
+     *
+     * @param type observed feature type
+     * @param relativeX x-offset from the agent
+     * @param relativeY y-offset from the agent
+     * @param details feature-specific details, or {@code null}
+     * @param step simulation step when it was observed
+     */
     public void rememberObservation(String type, int relativeX, int relativeY, String details, int step) {
         int absoluteX = agentX + relativeX;
         int absoluteY = agentY + relativeY;
@@ -94,24 +136,51 @@ public class InternalMap {
         putObservation(key, new Observation(type, absoluteX, absoluteY, observationDetails, step));
     }
 
+    /**
+     * Records a cell as free at an offset from the agent.
+     *
+     * @param relativeX x-offset from the agent
+     * @param relativeY y-offset from the agent
+     * @param step simulation step when it was observed
+     */
     public void rememberFreeCell(int relativeX, int relativeY, int step) {
         rememberObservation("free", relativeX, relativeY, "", step);
     }
 
+    /** Clears entity positions that were visible during the previous update. */
     public void clearOccupiedEntityPositions() {
         occupiedEntityPositions.clear();
         blockedPositionsSnapshot = null;
     }
 
+    /**
+     * Removes a previously recorded goal zone at the given absolute position.
+     *
+     * @param position absolute position of the goal zone to remove
+     */
     public void forgetGoalZone(Position position) {
         removeObservationTypeAt(position.x(), position.y(), "goalZone");
     }
 
+    /**
+     * Records a currently visible entity at an offset from the agent.
+     *
+     * @param relativeX x-offset from the agent
+     * @param relativeY y-offset from the agent
+     */
     public void rememberOccupiedEntity(int relativeX, int relativeY) {
         occupiedEntityPositions.add(new Position(agentX + relativeX, agentY + relativeY));
         blockedPositionsSnapshot = null;
     }
 
+    /**
+     * Updates observations and transient occupancy from one percept batch.
+     * Unseen goal zones within vision are removed, while other map observations
+     * remain available until replaced or explicitly cleared.
+     *
+     * @param percepts current simulation percepts
+     * @param teamName this agent's team name, used to identify visible teammates
+     */
     public void updateFromPercepts(List<Percept> percepts, String teamName) {
         int step = -1;
         int vision = -1;
@@ -190,14 +259,21 @@ public class InternalMap {
         }
     }
 
+    /** @return visible teammate offsets relative to the agent */
     public Set<Position> getVisibleTeammates() {
         return Set.copyOf(visibleTeammates);
     }
 
+    /** @return absolute positions occupied by entities visible in the current step */
     public Set<Position> getPhysicalOccupiedEntityPositions() {
         return Set.copyOf(occupiedEntityPositions);
     }
 
+    /**
+     * Merges observations encoded as an EIS parameter list.
+     *
+     * @param parameter encoded observation list
+     */
     public void mergeObservations(Parameter parameter) {
         if (!(parameter instanceof ParameterList map)) {
             return;
@@ -205,6 +281,11 @@ public class InternalMap {
         mergeObservations(parseObservations(map));
     }
 
+    /**
+     * Replaces stored observations with those encoded as an EIS parameter list.
+     *
+     * @param parameter encoded observation list
+     */
     public void setObservations(Parameter parameter) {
         if (!(parameter instanceof ParameterList map)) {
             return;
@@ -212,6 +293,7 @@ public class InternalMap {
         setObservations(parseObservations(map));
     }
 
+    /** @return all stored observations encoded for inter-agent messages */
     public ParameterList toParameterList() {
         ParameterList map = new ParameterList();
         for (Observation observation : observations.values()) {
@@ -221,6 +303,13 @@ public class InternalMap {
         return map;
     }
 
+    /**
+     * Converts map-related percepts into absolute-coordinate message entries.
+     *
+     * @param percepts current simulation percepts
+     * @param step simulation step represented by these percepts
+     * @return serialized observations from this percept batch
+     */
     public ParameterList currentPercepts(List<Percept> percepts, int step) {
         ParameterList map = new ParameterList();
         for (Percept percept : percepts) {
@@ -271,6 +360,7 @@ public class InternalMap {
         return parsed;
     }
 
+    /** @return an immutable snapshot of all stored observations */
     public List<Observation> getObservations() {
         if (observationsSnapshot == null) {
             observationsSnapshot = List.copyOf(observations.values());
@@ -278,6 +368,11 @@ public class InternalMap {
         return observationsSnapshot;
     }
 
+    /**
+     * Merges observations, replacing conflicting data at the same cell.
+     *
+     * @param observationsToMerge observations expressed in absolute coordinates
+     */
     public void mergeObservations(List<Observation> observationsToMerge) {
         for (Observation observation : observationsToMerge) {
             removeObservationsForUpdate(observation.x(), observation.y(), observation.type());
@@ -289,6 +384,11 @@ public class InternalMap {
         }
     }
 
+    /**
+     * Replaces stored observations and clears transient entity occupancy.
+     *
+     * @param newObservations complete replacement set in absolute coordinates
+     */
     public void setObservations(List<Observation> newObservations) {
         observations.clear();
         keysByPosition.clear();
@@ -305,6 +405,7 @@ public class InternalMap {
         }
     }
 
+    /** @return an immutable snapshot of known blocked and occupied cells */
     public List<Position> getBlockedPositions() {
         if (blockedPositionsSnapshot == null) {
             Set<Position> blockedPositions = new HashSet<>(occupiedEntityPositions);
@@ -317,6 +418,13 @@ public class InternalMap {
         return blockedPositionsSnapshot;
     }
 
+    /**
+     * Checks whether any map observation exists at an absolute position.
+     *
+     * @param x absolute x-coordinate
+     * @param y absolute y-coordinate
+     * @return {@code true} if the position has a stored observation
+     */
     public boolean isKnownPosition(int x, int y) {
         if (knownPositionsSnapshot == null) {
             Set<Position> knownPositions = new HashSet<>();
@@ -327,12 +435,25 @@ public class InternalMap {
         return knownPositionsSnapshot.contains(new Position(x, y));
     }
 
+    /**
+     * Marks an absolute position as a failed path for the given simulation step.
+     *
+     * @param x absolute x-coordinate
+     * @param y absolute y-coordinate
+     * @param step simulation step when the path failed
+     */
     public void rememberFailedPath(int x, int y, int step) {
         removeBlockedObservationsAt(x, y);
         ObservationKey key = new ObservationKey("failedPath", x, y, "");
         putObservation(key, new Observation("failedPath", x, y, "", step));
     }
 
+    /**
+     * Removes blocking observations at an absolute position and marks it free.
+     *
+     * @param x absolute x-coordinate
+     * @param y absolute y-coordinate
+     */
     public void forgetObservationsAt(int x, int y) {
         removeBlockedObservationsAt(x, y);
         rememberFreeCell(x - agentX, y - agentY, 0);
@@ -419,6 +540,12 @@ public class InternalMap {
                 || type.equals("block");
     }
 
+    /**
+     * Translates the agent, observations, and occupied entities by the same offset.
+     *
+     * @param offsetX x-coordinate translation
+     * @param offsetY y-coordinate translation
+     */
     public void translate(int offsetX, int offsetY) {
         agentX += offsetX;
         agentY += offsetY;

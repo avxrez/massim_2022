@@ -20,8 +20,13 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
 
+/**
+ * BDI agent that explores the map, selects tasks, coordinates group work, and
+ * executes movement and block-handling plans.
+ */
 public class BasicAgent extends Agent {
 
+    /** The high-level behavior currently considered by the agent. */
     private enum Desire {
         EXPLORE,
         CLEAR_OBSTACLE,
@@ -36,6 +41,7 @@ public class BasicAgent extends Agent {
         SUBMIT
     }
 
+    /** An ordered plan and the index of its next action. */
     private record Intention(Desire desire, List<String> plan, int nextAction) {
 
         private Intention advance() {
@@ -61,9 +67,11 @@ public class BasicAgent extends Agent {
     private boolean deactivated;
     private String currentRole = "";
     private String currentTask;
+    /** Parsed task data used for task selection and assembly planning. */
     private record TaskInfo(String name, int deadline, List<String> blockTypes,
             List<InternalMap.Position> offsets) {
 
+        /** Creates task data from the server's task percept. */
         private static TaskInfo fromPercept(Percept taskPercept) {
             String name = taskPercept.getParameters().get(0) instanceof Identifier identifier
                     ? identifier.getValue() : "";
@@ -143,21 +151,27 @@ public class BasicAgent extends Agent {
     private final List<PendingTeammateRequest> pendingTeammateRequests = new ArrayList<>();
     private final InternalMap internalMap = new InternalMap();
 
+    /** A currently visible thing represented relative to this agent. */
     private record VisibleThing(int x, int y, String type, String details) {}
 
+    /** Teammate identity request queued until the current percept batch is processed. */
     private record PendingTeammateRequest(String sender, String senderLeaderName, int x, int y,
             int senderX, int senderY, int receiverX, int receiverY,
             List<VisibleThing> senderVisibleThings) {}
 
+    /** Coordinate data retained while a teammate identity exchange is confirmed. */
     private record PendingTeammateConfirmation(String senderLeaderName, int senderX, int senderY,
             int relativeX, int relativeY) {}
 
+    /** A teammate-delivered block awaiting connection to the leader's assembly. */
     private record PendingAssemblyAttachment(String member, String blockType,
             InternalMap.Position targetPosition) {}
 
+    /** An assembly connection currently being coordinated with a teammate. */
     private record PendingAssemblyConnection(String partner, String blockType,
             InternalMap.Position targetPosition, int leaderBlockX, int leaderBlockY) {}
 
+    /** Versioned snapshot of goal cells reserved by one agent. */
     private record GoalReservationSnapshot(int revision, int updatedAtStep,
             Set<InternalMap.Position> positions) {
 
@@ -189,6 +203,12 @@ public class BasicAgent extends Agent {
     private final AStarPathPlanner pathPlanner = new AStarPathPlanner();
     private final ExplorationTargetSelector explorationTargetSelector = new ExplorationTargetSelector();
 
+    /**
+     * Creates an agent with the given identity and message service.
+     *
+     * @param name agent name
+     * @param mailbox service used to send and receive agent messages
+     */
     public BasicAgent(String name, MailService mailbox) {
         super(name, mailbox);
         leaderName = name;
@@ -196,10 +216,8 @@ public class BasicAgent extends Agent {
 
     private void applyTeammateConfirmation(String sender, PendingTeammateConfirmation confirmation) {
         if (nameNumber(leaderName) > nameNumber(confirmation.senderLeaderName())) {
-            int offsetX = confirmation.senderX() + confirmation.relativeX()
-                    - internalMap.getAgentX();
-            int offsetY = confirmation.senderY() + confirmation.relativeY()
-                    - internalMap.getAgentY();
+                int offsetX = confirmation.senderX() + confirmation.relativeX() - internalMap.getAgentX();
+                int offsetY = confirmation.senderY() + confirmation.relativeY() - internalMap.getAgentY();
             switchLeader(confirmation.senderLeaderName(), offsetX, offsetY);
         }
         rememberKnownAgent(sender,
@@ -212,6 +230,12 @@ public class BasicAgent extends Agent {
     public void handlePercept(Percept percept) {
     }
 
+    /**
+     * Processes a teammate message and updates coordination state.
+     *
+     * @param message message percept
+     * @param sender name of the sending agent
+     */
     @Override
     public void handleMessage(Percept message, String sender) {
         if (message.getName().equals("mapMerge")
@@ -566,6 +590,7 @@ public class BasicAgent extends Agent {
 
     }
 
+    /** Replies only when exactly one queued teammate request matches this agent's view. */
     private void processTeammateRequests() {
         List<PendingTeammateRequest> requests;
         synchronized (pendingTeammateRequests) {
@@ -619,8 +644,7 @@ public class BasicAgent extends Agent {
                 && percept.getParameters().size() >= 2
                 && percept.getParameters().get(0) instanceof Numeral x
                 && percept.getParameters().get(1) instanceof Numeral y) {
-            attachedPositions.add(new InternalMap.Position(
-                x.getValue().intValue(), y.getValue().intValue()));
+                    attachedPositions.add(new InternalMap.Position(x.getValue().intValue(), y.getValue().intValue()));
             } else if (percept.getName().equals("thing")
                     && percept.getParameters().size() >= 3
                     && percept.getParameters().get(0) instanceof Numeral x
@@ -641,9 +665,7 @@ public class BasicAgent extends Agent {
                     && percept.getParameters().size() >= 2
                     && percept.getParameters().get(0) instanceof Numeral x
                     && percept.getParameters().get(1) instanceof Numeral y) {
-                currentVisibleThings.add(new VisibleThing(
-                        x.getValue().intValue(), y.getValue().intValue(),
-                        percept.getName(), ""));
+                        currentVisibleThings.add(new VisibleThing(x.getValue().intValue(), y.getValue().intValue(), percept.getName(), ""));
             }
         }
             currentVisibleThings.removeIf(thing ->
@@ -684,6 +706,7 @@ public class BasicAgent extends Agent {
         return things;
     }
 
+    /** Checks shared visible things before accepting a claimed teammate identity. */
     private boolean isConsistentWithOwnView(int relativeX, int relativeY,
             List<VisibleThing> reportedThings) {
         int matchingVerificationThings = 0;
@@ -859,6 +882,7 @@ public class BasicAgent extends Agent {
         internalMap.updateAgentPositionFromPercepts(percepts);
     }
 
+    /** Updates task, role, step, and deactivation beliefs from the current percept batch. */
     private void updateBeliefs(List<Percept> percepts) {
         currentTasks.clear();
         boolean taskPerceptReceived = false;
@@ -892,15 +916,10 @@ public class BasicAgent extends Agent {
                 }
             }
         }
-        boolean previousSubmitSucceeded = "submit".equals(previousAction)
-                && "success".equals(previousActionResult);
+        boolean previousSubmitSucceeded = "submit".equals(previousAction) && "success".equals(previousActionResult);
 
-        boolean currentTaskAvailable = currentTasks.stream()
-            .anyMatch(task -> task.name().equals(currentTask));
-        boolean selectNewTask = currentTask == null
-                || !currentTaskAvailable
-                || !isTaskActive()
-                || waitingForNextTask;
+        boolean currentTaskAvailable = currentTasks.stream().anyMatch(task -> task.name().equals(currentTask));
+        boolean selectNewTask = currentTask == null || !currentTaskAvailable || !isTaskActive() || waitingForNextTask;
         if (selectNewTask) {
             TaskInfo selectedTask = currentTasks.stream()
                     .filter(task -> task.activeAt(currentStep))
@@ -1155,8 +1174,7 @@ public class BasicAgent extends Agent {
     }
 
     private boolean isGoalReservationSnapshotFresh(GoalReservationSnapshot snapshot) {
-        return currentStep < 0
-                || currentStep - snapshot.updatedAtStep() <= GOAL_RESERVATION_MAX_AGE;
+        return currentStep < 0 || currentStep - snapshot.updatedAtStep() <= GOAL_RESERVATION_MAX_AGE;
     }
 
     private int calculateDesiredGroupSize() {
@@ -1232,10 +1250,10 @@ public class BasicAgent extends Agent {
     }
 
     private boolean hasFormableGroupTask() {
-        return currentTasks.stream()
-                .anyMatch(task -> canFormTaskGroup(task) && task.groupSize() > 1);
+        return currentTasks.stream().anyMatch(task -> canFormTaskGroup(task) && task.groupSize() > 1);
     }
 
+    /** Selects an available group task and begins inviting known free agents. */
     private void startGroupFormationCore() {
         TaskInfo selectedTask = currentTasks.stream()
                 .filter(this::canFormTaskGroup)
@@ -1362,6 +1380,10 @@ public class BasicAgent extends Agent {
         assignBlocksToCurrentGroupAt(assemblyAnchor);
     }
 
+    /**
+     * Reserves the assembly area and assigns each fetcher its required block
+     * and delivery position relative to the chosen anchor.
+     */
     private void assignBlocksToCurrentGroupAt(InternalMap.Position leaderGoalAnchor) {
         List<String> members = new ArrayList<>(currentGroupMembers);
         members.sort(String::compareTo);
@@ -1397,6 +1419,7 @@ public class BasicAgent extends Agent {
 
     }
 
+    /** Keeps the assembly anchor on a reachable, available goal zone. */
     private void refreshGroupGoalLocation() {
         if (goalPosition == null || !isCurrentGroupLeader()) {
             return;
@@ -1510,23 +1533,6 @@ public class BasicAgent extends Agent {
                         new Numeral(goalPosition.y())), member, getName());
             }
         }
-    }
-
-    private void dissolveGroupAndResumeExploration() {
-        Set<String> members = new HashSet<>(currentGroupMembers);
-        for (Map.Entry<String, String> entry : knownAgentGroupLeader.entrySet()) {
-            if (getName().equals(entry.getValue())) {
-                members.add(entry.getKey());
-            }
-        }
-        for (String member : members) {
-            if (!member.equals(getName())) {
-                sendMessage(new Percept("groupDissolve"), member, getName());
-            }
-        }
-        resetGroupStateForNewTask();
-        explorationFinished = false;
-        resetRetrieveAssignment();
     }
 
     private void dissolveCurrentGroup() {
@@ -1727,6 +1733,7 @@ public class BasicAgent extends Agent {
         return false;
     }
 
+    /** Advances or repairs the active intention using the previous action result. */
     private void updateIntentionAfterAction(List<Percept> percepts) {
         if (pendingAction == null || currentIntention == null) {
             return;
@@ -1921,8 +1928,7 @@ public class BasicAgent extends Agent {
             return;
         }
 
-        boolean atDeliveryTarget = carriedBlockPosition != null
-                && carriedBlockPosition.equals(goalPosition);
+        boolean atDeliveryTarget = carriedBlockPosition != null && carriedBlockPosition.equals(goalPosition);
         if (!atDeliveryTarget) {
             blockPlaced = false;
             return;
@@ -2021,6 +2027,7 @@ public class BasicAgent extends Agent {
         return null;
     }
 
+    /** Derives currently eligible behaviors from the agent's beliefs and state. */
     private Set<Desire> generateDesires() {
         Set<Desire> desires = EnumSet.noneOf(Desire.class);
 
@@ -2202,6 +2209,7 @@ public class BasicAgent extends Agent {
         return "n";
     }
 
+    /** Chooses the highest-priority intention among the currently eligible desires. */
     private Intention selectIntention(Set<Desire> desires) {
         if (desires.contains(Desire.WAIT)) {
             return new Intention(Desire.WAIT, List.of(), 0);
@@ -2295,6 +2303,7 @@ public class BasicAgent extends Agent {
         return path != null && !path.isEmpty();
     }
 
+    /** Plans movement to a target using the current carrying and occupancy state. */
     private List<String> findPathForCurrentState(InternalMap.Position start,
             InternalMap.Position goal, List<InternalMap.Position> blockedPositions,
             Set<InternalMap.Position> occupiedPositions) {
@@ -2306,6 +2315,7 @@ public class BasicAgent extends Agent {
                 reservedGoalPositionsForMovement());
     }
 
+    /** Plans to an agent position while carrying a block in the required direction. */
     private List<String> findPathForCurrentState(InternalMap.Position start,
             InternalMap.Position goal, String requiredBlockDirection,
             List<InternalMap.Position> blockedPositions,
@@ -2432,6 +2442,7 @@ public class BasicAgent extends Agent {
         return true;
     }
 
+    /** Builds the next action plan for obtaining and delivering the assigned block. */
     private Intention createRetrieveBlockIntention() {
         if (goalPosition == null || deliveryBlockType == null) {
             return new Intention(Desire.WAIT, List.of(), 0);
@@ -2749,6 +2760,7 @@ public class BasicAgent extends Agent {
                     || currentIntention.desire() != Desire.REACH_ROLE_ZONE);
     }
 
+    /** Recomputes movement plans when the map or coordination state has changed. */
     private void replanMovementIntention() {
         if (currentIntention == null || currentIntention.finished()) {
             return;
@@ -2826,6 +2838,7 @@ public class BasicAgent extends Agent {
         throw new IllegalArgumentException("Invalid direction: " + direction);
     }
 
+    /** Executes the next step of the active intention. */
     private Action executeIntention() {
         if (currentIntention == null || currentIntention.finished()) {
             return skip();
@@ -3045,6 +3058,12 @@ public class BasicAgent extends Agent {
         return new Action("skip", new Numeral(0), new Numeral(-1));
     }
 
+    /**
+     * Processes the current simulation step and returns the action to execute.
+     * Returns {@code null} when the percept batch does not represent a new action cycle.
+     *
+     * @return the selected action, or {@code null} when no action is due
+     */
     @Override
     public Action step() {
         List<Percept> percepts = getPercepts();

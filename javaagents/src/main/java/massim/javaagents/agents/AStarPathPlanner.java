@@ -10,6 +10,10 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
 
+/**
+ * Finds shortest paths for an agent moving alone and cost-aware paths for an
+ * agent carrying an attached block.
+ */
 public class AStarPathPlanner {
 
     private static final int MAX_SEARCH_MARGIN = 10;
@@ -31,19 +35,18 @@ public class AStarPathPlanner {
 
     private record CarryNode(CarryState state, int cost, int estimate) {}
 
-    public List<String> findPath(InternalMap.Position start,
-                                  InternalMap.Position goal,
-                                  List<InternalMap.Position> blockedPositions) {
-        return findPath(start, goal, blockedPositions, Set.of(), Set.of());
-    }
-
-    public List<String> findPath(InternalMap.Position start,
-                                 InternalMap.Position goal,
-                                 List<InternalMap.Position> blockedPositions,
-                                 Set<InternalMap.Position> occupiedPositions) {
-        return findPath(start, goal, blockedPositions, occupiedPositions, Set.of());
-    }
-
+    /**
+     * Finds a path while avoiding blocked, occupied, and forbidden agent cells.
+     * If static obstacles prevent a route, retries without those obstacles while
+     * continuing to respect occupied and forbidden cells.
+     *
+     * @param start agent's starting position
+     * @param goal destination position
+     * @param blockedPositions known static obstacles
+     * @param occupiedPositions currently occupied cells
+     * @param forbiddenAgentPositions cells the agent must not enter
+     * @return movement directions from start to goal, or an empty list if no path exists
+     */
     public List<String> findPath(InternalMap.Position start,
                                  InternalMap.Position goal,
                                  List<InternalMap.Position> blockedPositions,
@@ -67,22 +70,19 @@ public class AStarPathPlanner {
         return fallbackPath != null ? fallbackPath : List.of();
     }
 
-    public List<String> findCarryingPath(InternalMap.Position start,
-                                          InternalMap.Position goal,
-                                          String blockDirection,
-                                          List<InternalMap.Position> blockedPositions) {
-        return findCarryingPath(start, goal, blockDirection, blockedPositions, Set.of());
-    }
-
-    public List<String> findCarryingPath(InternalMap.Position start,
-                                         InternalMap.Position goal,
-                                         String blockDirection,
-                                         List<InternalMap.Position> blockedPositions,
-                                         Set<InternalMap.Position> occupiedPositions) {
-        return findCarryingPath(start, goal, blockDirection, blockedPositions,
-                occupiedPositions, Set.of());
-    }
-
+    /**
+     * Finds a path that brings the carried block to {@code goal}.
+     * The agent may rotate the block and move only when the attached block remains
+     * behind it; turns and direction changes have configurable search costs.
+     *
+     * @param start agent's starting position
+     * @param goal destination position for the block
+     * @param blockDirection direction of the block relative to the agent
+     * @param blockedPositions known static obstacles
+     * @param occupiedPositions currently occupied cells
+     * @param forbiddenAgentPositions cells the agent must not enter
+     * @return movement and rotation steps, or an empty list if no path exists
+     */
     public List<String> findCarryingPath(InternalMap.Position start,
                                          InternalMap.Position goal,
                                          String blockDirection,
@@ -93,16 +93,19 @@ public class AStarPathPlanner {
                 occupiedPositions, forbiddenAgentPositions, null, false, false);
     }
 
-    public List<String> findCarryingPathToAgentPosition(InternalMap.Position start,
-                                                         InternalMap.Position goal,
-                                                         String blockDirection,
-                                                         String requiredBlockDirection,
-                                                         List<InternalMap.Position> blockedPositions,
-                                                         Set<InternalMap.Position> occupiedPositions) {
-        return findCarryingPathToAgentPosition(start, goal, blockDirection,
-                requiredBlockDirection, blockedPositions, occupiedPositions, Set.of());
-    }
-
+    /**
+     * Finds a carrying path to an agent position with the block in a required
+     * relative direction.
+     *
+     * @param start agent's starting position
+     * @param goal destination position for the agent
+     * @param blockDirection current direction of the attached block
+     * @param requiredBlockDirection required block direction at the destination
+     * @param blockedPositions known static obstacles
+     * @param occupiedPositions currently occupied cells
+     * @param forbiddenAgentPositions cells the agent must not enter
+     * @return movement and rotation steps, or an empty list if no path exists
+     */
     public List<String> findCarryingPathToAgentPosition(InternalMap.Position start,
                                                          InternalMap.Position goal,
                                                          String blockDirection,
@@ -114,6 +117,10 @@ public class AStarPathPlanner {
             occupiedPositions, forbiddenAgentPositions, requiredBlockDirection, true, false);
     }
 
+    /**
+     * Shared carrying search. In fallback mode static obstacles are ignored,
+     * while occupied cells and forbidden agent positions remain impassable.
+     */
     private List<String> findCarryingPath(InternalMap.Position start,
                                            InternalMap.Position goal,
                                            String blockDirection,
@@ -214,6 +221,7 @@ public class AStarPathPlanner {
         }
     }
 
+    /** Returns the cost of continuing straight or changing the movement direction. */
     private int moveCost(String previousDirection, String currentDirection, boolean fallback) {
         int baseCost = fallback ? CARRYING_FALLBACK_MOVE_COST : CARRYING_STRAIGHT_MOVE_COST;
         if (previousDirection == null || previousDirection.equals(currentDirection)) {
@@ -246,6 +254,7 @@ public class AStarPathPlanner {
         return new InternalMap.Position(position.x() + offset[0], position.y() + offset[1]);
     }
 
+    /** Runs bounded A* search for an agent that is not carrying a block. */
     private List<String> search(InternalMap.Position start,
                                  InternalMap.Position goal,
                                  Set<InternalMap.Position> blocked,
@@ -301,6 +310,7 @@ public class AStarPathPlanner {
                 && position.y() >= minY && position.y() <= maxY;
     }
 
+    /** Reconstructs movement directions from the predecessor map. */
     private List<String> reconstructPath(Map<InternalMap.Position, InternalMap.Position> parents,
                                           InternalMap.Position start,
                                           InternalMap.Position goal) {
