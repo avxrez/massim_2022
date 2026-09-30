@@ -112,7 +112,7 @@ public class AStarPathPlanner {
                                          Set<InternalMap.Position> occupiedPositions,
                                          Set<InternalMap.Position> forbiddenAgentPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-                            occupiedPositions, forbiddenAgentPositions, null, false, true);
+                            occupiedPositions, forbiddenAgentPositions, null, false, false);
     }
 
     /** Finds a carrying path that ends with the agent at the goal and the block at the required side. */
@@ -134,7 +134,7 @@ public class AStarPathPlanner {
                                                          Set<InternalMap.Position> occupiedPositions,
                                                          Set<InternalMap.Position> forbiddenAgentPositions) {
         return findCarryingPath(start, goal, blockDirection, blockedPositions,
-            occupiedPositions, forbiddenAgentPositions, requiredBlockDirection, true, true);
+            occupiedPositions, forbiddenAgentPositions, requiredBlockDirection, true, false);
     }
 
     private List<String> findCarryingPath(InternalMap.Position start,

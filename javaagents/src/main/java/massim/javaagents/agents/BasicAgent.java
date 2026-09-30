@@ -134,6 +134,7 @@ public class BasicAgent extends Agent {
     private String currentGroupInviteTarget = null;
     private boolean waitingForNextTask = false;
     private boolean groupGoalZoneConfirmed = false;
+    private boolean groupGoalRelocationPending;
     private int currentTaskBlockCount = 1;
     private int desiredGroupSize = 1;
     private String currentGroupLeader = "";
@@ -207,7 +208,6 @@ public class BasicAgent extends Agent {
     private String pendingDirection;
     private String pendingRotation;
     private String clearDirection;
-    private boolean clearRandomRetryUsed;
     private PendingAssemblyAttachment pendingAssemblyAttachment;
     private PendingAssemblyConnection pendingAssemblyConnection;
 
@@ -563,8 +563,7 @@ public class BasicAgent extends Agent {
                 && message.getParameters().get(0) instanceof Identifier blockType
                 && message.getParameters().get(1) instanceof Numeral targetX
                 && message.getParameters().get(2) instanceof Numeral targetY) {
-            if (deliveryBlockType == null
-                    || deliveryBlockType.equalsIgnoreCase(blockType.getValue())) {
+            if (currentGroupLeader.isEmpty() || sender.equals(currentGroupLeader)) {
                 deliveryBlockType = blockType.getValue();
                 goalPosition = new InternalMap.Position(
                         targetX.getValue().intValue(), targetY.getValue().intValue());
@@ -659,8 +658,15 @@ public class BasicAgent extends Agent {
 
     private void updateCurrentVisibleThings(List<Percept> percepts) {
         currentVisibleThings.clear();
+        Set<InternalMap.Position> attachedPositions = new HashSet<>();
         for (Percept percept : percepts) {
-            if (percept.getName().equals("thing")
+            if (percept.getName().equals("attached")
+                && percept.getParameters().size() >= 2
+                && percept.getParameters().get(0) instanceof Numeral x
+                && percept.getParameters().get(1) instanceof Numeral y) {
+            attachedPositions.add(new InternalMap.Position(
+                x.getValue().intValue(), y.getValue().intValue()));
+            } else if (percept.getName().equals("thing")
                     && percept.getParameters().size() >= 3
                     && percept.getParameters().get(0) instanceof Numeral x
                     && percept.getParameters().get(1) instanceof Numeral y
@@ -685,6 +691,9 @@ public class BasicAgent extends Agent {
                         percept.getName(), ""));
             }
         }
+            currentVisibleThings.removeIf(thing ->
+                thing.type().equals("block")
+                    && attachedPositions.contains(new InternalMap.Position(thing.x(), thing.y())));
     }
 
     private ParameterList currentVisibleThingsParameters() {
@@ -911,6 +920,9 @@ public class BasicAgent extends Agent {
     private void updateBeliefs(List<Percept> percepts) {
         currentTasks.clear();
         boolean taskPerceptReceived = false;
+        boolean wasDeactivated = deactivated;
+        String previousAction = null;
+        String previousActionResult = null;
         String previousTask = currentTask;
 
         for (Percept percept : percepts) {
@@ -928,6 +940,8 @@ public class BasicAgent extends Agent {
                 }
                 case "team" -> teamName = identifierValue(percept, teamName);
                 case "deactivated" -> deactivated = identifierValue(percept, "false").equals("true");
+                case "lastAction" -> previousAction = identifierValue(percept, null);
+                case "lastActionResult" -> previousActionResult = identifierValue(percept, null);
                 case "task" -> {
                     taskPerceptReceived = true;
                     currentTasks.add(TaskInfo.fromPercept(percept));
@@ -937,6 +951,8 @@ public class BasicAgent extends Agent {
                 }
             }
         }
+        boolean previousSubmitSucceeded = "submit".equals(previousAction)
+                && "success".equals(previousActionResult);
 
         boolean currentTaskAvailable = currentTasks.stream()
             .anyMatch(task -> task.name().equals(currentTask));
@@ -963,7 +979,18 @@ public class BasicAgent extends Agent {
         }
 
         if (!taskPerceptReceived) {
-            resetGroupStateForNewTask();
+            if (previousTask != null) {
+                resetGroupStateForNewTask();
+                resetRetrieveAssignment();
+                clearPendingActionState();
+            }
+            if (previousSubmitSucceeded) {
+                finishAssemblyAfterSuccessfulSubmit();
+            } else if (blockRetrieved) {
+                detachRequested = true;
+            } else if (previousTask != null) {
+                resetCarriedBlockTracking();
+            }
             currentTask = null;
             currentTaskInfo = null;
             requiredDispenserTypes.clear();
@@ -972,26 +999,46 @@ public class BasicAgent extends Agent {
             requiredBlockOffset = null;
             deliveryBlockType = null;
             goalPosition = null;
-            resetRetrieveAssignment();
-            resetCarriedBlockTracking();
-            clearPendingActionState();
         } else if (!Objects.equals(currentTask, previousTask)) {
             waitingForNextTask = false;
             resetGroupStateForNewTask();
             deliveryBlockType = null;
             goalPosition = null;
             resetRetrieveAssignment();
+            if (previousSubmitSucceeded) {
+                finishAssemblyAfterSuccessfulSubmit();
+            } else if (blockRetrieved) {
+                detachRequested = true;
+            }
             clearPendingActionState();
         } else if (!isTaskActive()) {
             deliveryBlockType = null;
             goalPosition = null;
             resetRetrieveAssignment();
+            if (previousSubmitSucceeded) {
+                finishAssemblyAfterSuccessfulSubmit();
+            } else if (blockRetrieved) {
+                detachRequested = true;
+            }
             clearPendingActionState();
         }
 
-        if (deactivated) {
+        if (deactivated && !wasDeactivated) {
+            resetAssemblyStateAfterDeactivation();
+        } else if (deactivated) {
             resetCarriedBlockTracking();
         }
+    }
+
+    private void resetAssemblyStateAfterDeactivation() {
+        attachedBlockDirections.clear();
+        pendingAssemblyDetaches.clear();
+        assemblyCleanupRequested = false;
+        groupGoalRelocationPending = false;
+        resetCarriedBlockTracking();
+        resetGroupStateForNewTask();
+        resetRetrieveAssignment();
+        clearPendingActionState();
     }
 
     private void applyTaskInfo(TaskInfo taskInfo) {
@@ -1183,6 +1230,7 @@ public class BasicAgent extends Agent {
     }
 
     private void resetGroupStateForNewTask() {
+        groupGoalRelocationPending = false;
         requestAssemblyCleanup();
         for (String member : new ArrayList<>(currentGroupMembers)) {
             if (!member.equals(getName()) && !assemblyCleanupRequested) {
@@ -1214,9 +1262,13 @@ public class BasicAgent extends Agent {
     }
 
     private void startGroupFormationAsSuccessor() {
-        if (isCarryingBlock()) {
+        if (isCarryingBlock() || !attachedBlockDirections.isEmpty()) {
             successorGroupFormationAfterDetach = true;
-            detachRequested = true;
+            if (attachedBlockDirections.isEmpty()) {
+                detachRequested = true;
+            } else {
+                assemblyCleanupRequested = true;
+            }
             currentIntention = null;
             return;
         }
@@ -1409,8 +1461,10 @@ public class BasicAgent extends Agent {
             return;
         }
 
-        if (isKnownGoalZone(goalPosition)) {
+        if (isKnownGoalZone(goalPosition)
+            && !hasOpponentOnReservedAssemblyPosition(goalPosition)) {
             groupGoalZoneConfirmed = true;
+            groupGoalRelocationPending = false;
             return;
         }
 
@@ -1418,16 +1472,15 @@ public class BasicAgent extends Agent {
             return;
         }
 
-        InternalMap.Observation replacement = findNearestGoalZone();
+        InternalMap.Position replacement = findReachableGoalZone(currentPosition(), goalPosition);
         if (replacement == null) {
-            dissolveGroupAndResumeExploration();
+            groupGoalRelocationPending = true;
+            currentIntention = new Intention(Desire.WAIT, List.of(), 0);
             return;
         }
 
-        goalPosition = new InternalMap.Position(replacement.x(), replacement.y());
-        currentIntention = null;
-        clearAssemblyState();
-        assignBlocksToCurrentGroupAt(goalPosition);
+        groupGoalRelocationPending = false;
+        relocateAssemblyGoal(replacement);
     }
 
         private void tryStartPendingAssemblyConnection(PendingAssemblyAttachment delivery) {
@@ -1605,6 +1658,10 @@ public class BasicAgent extends Agent {
             sendMessage(new Percept("groupDissolve"), member, getName());
         }
         deferredGroupDissolveMembers.clear();
+        if (successorGroupFormationAfterDetach) {
+            successorGroupFormationAfterDetach = false;
+            startGroupFormationCore();
+        }
     }
 
     private void finishAssemblyAfterSuccessfulSubmit() {
@@ -1762,14 +1819,19 @@ public class BasicAgent extends Agent {
 
             if ("request".equals(lastAction)) {
                 blockRequested = true;
-            } else if ("clear".equals(lastAction)) {
-                clearRandomRetryUsed = false;
             } else if ("rotate".equals(lastAction) && pendingRotation != null) {
+                boolean clockwise = "cw".equals(pendingRotation);
                 if (retrieveBlockDirection != null) {
                     retrieveBlockDirection = rotateDirection(
-                            retrieveBlockDirection, "cw".equals(pendingRotation));
+                            retrieveBlockDirection, clockwise);
                 } else {
                     currentIntention = null;
+                }
+                if (isAssemblyLeader()) {
+                    for (int index = 0; index < attachedBlockDirections.size(); index++) {
+                        attachedBlockDirections.set(index,
+                                rotateDirection(attachedBlockDirections.get(index), clockwise));
+                    }
                 }
             } else if ("attach".equals(lastAction)) {
                 if (pendingAssemblyAttachment != null) {
@@ -1778,10 +1840,10 @@ public class BasicAgent extends Agent {
                                 pendingAssemblyAttachment.targetPosition(), currentPosition()));
                     }
                     assembledBlockPositions.add(pendingAssemblyAttachment.targetPosition());
-                        assembledBlockTypes.put(relativeAssemblyPosition(
+                    assembledBlockTypes.put(relativeAssemblyPosition(
                             pendingAssemblyAttachment.targetPosition()),
                             pendingAssemblyAttachment.blockType());
-                            pendingAssemblyDetaches.add(pendingAssemblyAttachment.member());
+                    pendingAssemblyDetaches.add(pendingAssemblyAttachment.member());
                     sendMessage(new Percept("groupDetachBlock"),
                             pendingAssemblyAttachment.member(), getName());
                     pendingAssemblyDeliveries.remove(pendingAssemblyAttachment.targetPosition());
@@ -1844,21 +1906,18 @@ public class BasicAgent extends Agent {
                 waitingForNextTask = true;
             }
         } else {
-                if ("clear".equals(lastAction)
+            if ("clear".equals(lastAction)
                     && "failed_random".equals(lastActionResult)
-                    && clearDirection != null
-                    && !clearRandomRetryUsed) {
-                clearRandomRetryUsed = true;
+                    && clearDirection != null) {
                 currentIntention = new Intention(
-                    currentIntention.desire(),
-                    currentIntention.plan(),
-                    currentIntention.nextAction());
-                } else if ("clear".equals(lastAction) && clearDirection != null) {
+                        currentIntention.desire(),
+                        currentIntention.plan(),
+                        currentIntention.nextAction());
+            } else if ("clear".equals(lastAction) && clearDirection != null) {
                 int[] offset = directionOffset(clearDirection);
                 internalMap.forgetObservationsAt(
                         internalMap.getAgentX() + offset[0],
                         internalMap.getAgentY() + offset[1]);
-                clearRandomRetryUsed = false;
                 currentIntention = null;
             } else if ("clear".equals(lastAction)
                     && blockRetrieved
@@ -1882,7 +1941,8 @@ public class BasicAgent extends Agent {
                     && pendingAssemblyConnection != null) {
                 currentIntention = new Intention(Desire.RETRIEVE_BLOCK,
                         currentIntention.plan(), currentIntention.nextAction());
-            } else if ("move".equals(lastAction) && pendingDirection != null) {
+                } else if ("move".equals(lastAction)
+                    && isMovementDirection(pendingDirection)) {
                 int[] offset = directionOffset(pendingDirection);
                 int blockedX = internalMap.getAgentX() + offset[0];
                 int blockedY = internalMap.getAgentY() + offset[1];
@@ -1924,6 +1984,47 @@ public class BasicAgent extends Agent {
         retrieveBlockDirection = directionTo(
                 attachedPosition,
                 new InternalMap.Position(internalMap.getAgentX(), internalMap.getAgentY()));
+        recordAttachedAssemblyRequirement(attachedPosition, carriedBlockType);
+    }
+
+    private void updateBlockDeliveryStatus() {
+        if (!blockRetrieved || currentTaskBlockCount <= 1 || goalPosition == null) {
+            return;
+        }
+
+        boolean atDeliveryTarget = carriedBlockPosition != null
+                && carriedBlockPosition.equals(goalPosition);
+        if (!atDeliveryTarget) {
+            blockPlaced = false;
+            return;
+        }
+
+        if (!blockPlaced && !currentGroupLeader.isEmpty()
+                && !currentGroupLeader.equals(getName())) {
+            sendMessage(new Percept("groupBlockDelivered",
+                    new Identifier(deliveryBlockType),
+                    new Numeral(goalPosition.x()),
+                    new Numeral(goalPosition.y())), currentGroupLeader, getName());
+        }
+        blockPlaced = true;
+    }
+
+    private void recordAttachedAssemblyRequirement(InternalMap.Position blockPosition,
+            String blockType) {
+        if (!isCurrentGroupLeader() || currentTaskBlockCount <= 1
+                || goalPosition == null || blockType == null) {
+            return;
+        }
+
+        InternalMap.Position requirementOffset = relativeAssemblyPosition(blockPosition);
+        for (int index = 0; index < taskRequirementOffsets.size(); index++) {
+            if (taskRequirementOffsets.get(index).equals(requirementOffset)
+                    && taskBlockTypes.get(index).equalsIgnoreCase(blockType)) {
+                assembledBlockPositions.add(blockPosition);
+                assembledBlockTypes.put(requirementOffset, blockType);
+                return;
+            }
+        }
     }
 
     private void resetCarriedBlockTracking() {
@@ -2049,7 +2150,7 @@ public class BasicAgent extends Agent {
 
         }
 
-        if (leaderName.equals(getName())
+        if (isCurrentGroupLeader()
                 && currentTask != null
                 && isTaskActive()
                 && currentTaskBlockCount > 1
@@ -2063,7 +2164,8 @@ public class BasicAgent extends Agent {
         if (currentTask != null && isTaskActive() && currentTaskBlockCount > 1
                 && (groupLeaderMode || currentGroupLeader.equals(getName()))
                 && goalPosition != null) {
-            desires.add(isAtGoalPosition() ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
+            desires.add(groupGoalRelocationPending || isAtGoalPosition()
+                ? Desire.WAIT : Desire.REACH_GOAL_ZONE);
             return desires;
         }
 
@@ -2331,16 +2433,45 @@ public class BasicAgent extends Agent {
                 .map(observation -> new InternalMap.Position(observation.x(), observation.y()))
                 .filter(candidate -> !candidate.equals(currentTarget))
                 .filter(this::isGoalReservationAvailable)
-                .filter(candidate -> !isPhysicallyOccupied(candidate))
-                .filter(candidate -> pathExists(findPathForCurrentState(start, candidate,
+                .filter(candidate -> !hasOpponentOnReservedAssemblyPosition(candidate))
+                .filter(candidate -> candidate.equals(start) || !isPhysicallyOccupied(candidate))
+                .filter(candidate -> candidate.equals(start)
+                    || pathExists(findPathForCurrentState(start, candidate,
                         blockedPositionsForMovement(), occupiedPositionsForMovement())))
                 .min((first, second) -> Integer.compare(
-                        distanceTo(first.x(), first.y(), start.x(), start.y()),
-                        distanceTo(second.x(), second.y(), start.x(), start.y())))
+                    distanceTo(first.x(), first.y(), currentTarget.x(), currentTarget.y()),
+                    distanceTo(second.x(), second.y(), currentTarget.x(), currentTarget.y())))
                 .orElse(null);
     }
 
+    private boolean hasOpponentOnReservedAssemblyPosition(InternalMap.Position assemblyAnchor) {
+        if (teamName.isEmpty()) {
+            return false;
+        }
+
+        Set<InternalMap.Position> reservedPositions = new HashSet<>();
+        reservedPositions.add(assemblyAnchor);
+        for (InternalMap.Position offset : taskRequirementOffsets) {
+            reservedPositions.add(new InternalMap.Position(
+                    assemblyAnchor.x() + offset.x(), assemblyAnchor.y() + offset.y()));
+        }
+
+        int agentX = internalMap.getAgentX();
+        int agentY = internalMap.getAgentY();
+        for (VisibleThing thing : currentVisibleThings) {
+            if (thing.type().equals("entity")
+                    && !thing.details().isEmpty()
+                    && !thing.details().equals(teamName)
+                    && reservedPositions.contains(new InternalMap.Position(
+                            agentX + thing.x(), agentY + thing.y()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void relocateAssemblyGoal(InternalMap.Position replacement) {
+        groupGoalRelocationPending = false;
         goalPosition = replacement;
         currentIntention = null;
         clearAssemblyState();
@@ -2417,7 +2548,7 @@ public class BasicAgent extends Agent {
         if (!blockRequested) {
             InternalMap.Observation dispenser = findNearestDispenser(blockType);
             if (dispenser == null) {
-                return new Intention(Desire.WAIT, List.of(), 0);
+                return createExploreIntention();
             }
 
             InternalMap.Position dispenserPosition =
@@ -2425,6 +2556,10 @@ public class BasicAgent extends Agent {
                 String adjacentDirection = adjacentDirectionTo(dispenserPosition);
                 if (adjacentDirection != null) {
                 retrieveBlockDirection = adjacentDirection;
+                    if (isFreeBlockAt(adjacentDirection, blockType)) {
+                        return new Intention(Desire.RETRIEVE_BLOCK,
+                                List.of("attach:" + adjacentDirection), 0);
+                    }
                 return new Intention(Desire.RETRIEVE_BLOCK,
                     List.of("request:" + adjacentDirection), 0);
                 }
@@ -2436,7 +2571,7 @@ public class BasicAgent extends Agent {
                 }
                 return new Intention(Desire.RETRIEVE_BLOCK, path, 0);
             }
-            return new Intention(Desire.WAIT, List.of(), 0);
+            return createExploreIntention();
         }
 
         if (!blockRetrieved) {
@@ -2465,7 +2600,8 @@ public class BasicAgent extends Agent {
         }
 
         if (carriedBlockPosition != null && carriedBlockPosition.equals(deliveryTarget)) {
-            if (!currentGroupLeader.isEmpty() && !currentGroupLeader.equals(getName())) {
+            if (!blockPlaced && !currentGroupLeader.isEmpty()
+                    && !currentGroupLeader.equals(getName())) {
                 sendMessage(new Percept("groupBlockDelivered",
                         new Identifier(deliveryBlockType),
                         new Numeral(deliveryTarget.x()),
@@ -2559,8 +2695,18 @@ public class BasicAgent extends Agent {
     }
 
     private InternalMap.Observation findNearestDispenser(String blockType) {
-        return nearestObservation("dispenser",
-                observation -> observation.details().equalsIgnoreCase(blockType));
+        InternalMap.Position target = goalPosition == null ? currentPosition() : goalPosition;
+        int agentX = internalMap.getAgentX();
+        int agentY = internalMap.getAgentY();
+        return internalMap.getObservations().stream()
+            .filter(observation -> observation.type().equals("dispenser"))
+            .filter(observation -> observation.details().equalsIgnoreCase(blockType))
+            .min(Comparator
+                .comparingInt((InternalMap.Observation observation) ->
+                    distanceTo(observation.x(), observation.y(), target.x(), target.y()))
+                .thenComparingInt(observation ->
+                    distanceTo(observation.x(), observation.y(), agentX, agentY)))
+            .orElse(null);
     }
 
     private String directionTo(InternalMap.Position target, InternalMap.Position from) {
@@ -2705,6 +2851,11 @@ public class BasicAgent extends Agent {
         /** Replans movement after every perception cycle using the current map. */
         private void replanMovementIntention() {
             if (currentIntention == null || currentIntention.finished()) {
+                return;
+            }
+
+            if (groupGoalRelocationPending) {
+                currentIntention = new Intention(Desire.WAIT, List.of(), 0);
                 return;
             }
 
@@ -2932,7 +3083,6 @@ public class BasicAgent extends Agent {
                 }
             }
             pendingAction = "rotate";
-            pendingDirection = direction;
             pendingRotation = direction;
             return new Action("rotate", new Identifier(direction));
         }
@@ -2956,6 +3106,15 @@ public class BasicAgent extends Agent {
                         && thing.details().equalsIgnoreCase(deliveryBlockType));
     }
 
+        private boolean isFreeBlockAt(String direction, String blockType) {
+        int[] offset = directionOffset(direction);
+        return currentVisibleThings.stream().anyMatch(thing ->
+            thing.x() == offset[0]
+                && thing.y() == offset[1]
+                && thing.type().equals("block")
+                && thing.details().equalsIgnoreCase(blockType));
+        }
+
     private boolean rotationPossible(String rotation) {
         if (retrieveBlockDirection == null) {
             return false;
@@ -2969,8 +3128,8 @@ public class BasicAgent extends Agent {
     }
 
     private void rememberFailedRotationTarget() {
-        if (pendingDirection != null) {
-            rememberFailedRotationTarget(pendingDirection);
+        if (pendingRotation != null) {
+            rememberFailedRotationTarget(pendingRotation);
         }
     }
 
@@ -3028,12 +3187,15 @@ public class BasicAgent extends Agent {
         processTeammateRequests();
         exchangeTeammateNames();
 
+        System.out.println("Name: " + getName() + ", Percepts: " + percepts.toString());
+
         // --------------------------------------------------------
         // 3. Process previous intention
         // --------------------------------------------------------
 
         updateIntentionAfterAction(percepts);
         verifyCarriedBlock(percepts);
+        updateBlockDeliveryStatus();
         if (assemblyCleanupRequested) {
             currentIntention = null;
         }

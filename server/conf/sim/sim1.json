@@ -1,5 +1,5 @@
 {
-  "steps" : 400,
+  "steps" : 1000,
   "randomFail" : 1,
   "entities" : {"standard" : 10},
   "clusterBounds" : [1,3],
@@ -36,10 +36,10 @@
   "dispensers" : [5, 10],
 
   "tasks" : {
-    "size" : [1, 4],
+    "size" : [2, 4],
     "concurrent" : 1,
     "iterations" : [2, 5],
-    "maxDuration" : [100, 200]
+    "maxDuration" : [300, 500]
   },
 
   "events" : {
