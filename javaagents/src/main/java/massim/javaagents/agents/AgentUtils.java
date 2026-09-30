@@ -7,7 +7,6 @@ public final class AgentUtils {
     public static final List<String> CARDINAL_DIRECTIONS = List.of("n", "e", "s", "w");
 
     private AgentUtils() {
-        // utility class
     }
 
     public static int[] directionOffset(String direction) {

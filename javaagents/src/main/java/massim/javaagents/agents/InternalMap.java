@@ -14,53 +14,30 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * The agent's internal world model: its own position and every cell it (or
- * a teammate) has observed so far, expressed in one shared coordinate
- * system.
- */
 public class InternalMap {
 
     private static final int DEFAULT_VISION = 5;
 
-    /** Position des Agenten auf der internen Karte. */
     private int agentX = 0;
     private int agentY = 0;
 
-    /**
-     * Alle aktuell bekannten Beobachtungen.
-     *
-     * Der Key stellt sicher, dass wir pro Position/Typ/Detail nicht
-     * mehrere alte Informationen behalten.
-     */
     private final Map<ObservationKey, Observation> observations = new HashMap<>();
 
-    /** Index of observation keys by position, so replacing a cell is O(1) on average. */
     private final Map<Position, Set<ObservationKey>> keysByPosition = new HashMap<>();
 
     private List<Observation> observationsSnapshot;
     private List<Position> blockedPositionsSnapshot;
     private Set<Position> knownPositionsSnapshot;
 
-    /** Zellen, auf denen aktuell (in diesem Schritt) eine Entity gesehen wurde. */
     private final Set<Position> occupiedEntityPositions = new HashSet<>();
 
-    /** Zellen, auf denen aktuell sichtbare Teammitglieder stehen. */
     private final Set<Position> visibleTeammates = new HashSet<>();
-
-    // -------------------------------------------------------------------------
-    // Data classes
-    // -------------------------------------------------------------------------
 
     public record Observation(String type, int x, int y, String details, int lastSeenStep) {}
 
     public record Position(int x, int y) {}
 
     private record ObservationKey(String type, int x, int y, String details) {}
-
-    // -------------------------------------------------------------------------
-    // Agent position
-    // -------------------------------------------------------------------------
 
     public int getAgentX() {
         return agentX;
@@ -70,9 +47,6 @@ public class InternalMap {
         return agentY;
     }
 
-    /**
-     * Aktualisiert die Position des Agenten nach einer erfolgreichen Bewegung.
-     */
     public void updateAgentPosition(String direction) {
         switch (direction) {
             case "n" -> agentY--;
@@ -83,7 +57,6 @@ public class InternalMap {
         }
     }
 
-    /** Aktualisiert die eigene Kartenposition aus dem Ergebnis des letzten Zuges. */
     public void updateAgentPositionFromPercepts(List<Percept> percepts) {
         String lastAction = null;
         String lastActionResult = null;
@@ -110,16 +83,6 @@ public class InternalMap {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Remember observations
-    // -------------------------------------------------------------------------
-
-    /**
-     * Speichert eine beobachtete Zelle.
-     *
-     * Die übergebenen Koordinaten sind relativ zum Agenten. Intern werden
-     * sie in absolute Koordinaten umgerechnet.
-     */
     public void rememberObservation(String type, int relativeX, int relativeY, String details, int step) {
         int absoluteX = agentX + relativeX;
         int absoluteY = agentY + relativeY;
@@ -131,9 +94,6 @@ public class InternalMap {
         putObservation(key, new Observation(type, absoluteX, absoluteY, observationDetails, step));
     }
 
-    /**
-     * Speichert eine bekannte freie Zelle.
-     */
     public void rememberFreeCell(int relativeX, int relativeY, int step) {
         rememberObservation("free", relativeX, relativeY, "", step);
     }
@@ -152,7 +112,6 @@ public class InternalMap {
         blockedPositionsSnapshot = null;
     }
 
-    /** Aktualisiert die Karte und die aktuell sichtbaren Teammitglieder aus Percepts. */
     public void updateFromPercepts(List<Percept> percepts, String teamName) {
         int step = -1;
         int vision = -1;
@@ -239,7 +198,6 @@ public class InternalMap {
         return Set.copyOf(occupiedEntityPositions);
     }
 
-    /** Liest absolute Kartenbeobachtungen aus einer Nachrichtenliste ein. */
     public void mergeObservations(Parameter parameter) {
         if (!(parameter instanceof ParameterList map)) {
             return;
@@ -254,7 +212,6 @@ public class InternalMap {
         setObservations(parseObservations(map));
     }
 
-    /** Serialisiert die Karte für Agentennachrichten. */
     public ParameterList toParameterList() {
         ParameterList map = new ParameterList();
         for (Observation observation : observations.values()) {
@@ -264,7 +221,6 @@ public class InternalMap {
         return map;
     }
 
-    /** Erstellt absolute Kartenbeobachtungen aus den aktuellen lokalen Percepts. */
     public ParameterList currentPercepts(List<Percept> percepts, int step) {
         ParameterList map = new ParameterList();
         for (Percept percept : percepts) {
@@ -315,13 +271,6 @@ public class InternalMap {
         return parsed;
     }
 
-    // -------------------------------------------------------------------------
-    // Query map
-    // -------------------------------------------------------------------------
-
-    /**
-     * Gibt alle aktuell bekannten Beobachtungen zurück.
-     */
     public List<Observation> getObservations() {
         if (observationsSnapshot == null) {
             observationsSnapshot = List.copyOf(observations.values());
@@ -329,10 +278,6 @@ public class InternalMap {
         return observationsSnapshot;
     }
 
-    /**
-     * Fügt Beobachtungen einer bereits bekannten Karte mit absoluten
-     * Koordinaten in diese Karte ein.
-     */
     public void mergeObservations(List<Observation> observationsToMerge) {
         for (Observation observation : observationsToMerge) {
             removeObservationsForUpdate(observation.x(), observation.y(), observation.type());
@@ -344,7 +289,6 @@ public class InternalMap {
         }
     }
 
-    /** Replaces the complete observation map with absolute coordinates. */
     public void setObservations(List<Observation> newObservations) {
         observations.clear();
         keysByPosition.clear();
@@ -361,15 +305,6 @@ public class InternalMap {
         }
     }
 
-    /**
-     * Gibt alle Positionen zurück, die aktuell als blockiert gelten.
-     *
-     * obstacle:    tatsächlich beobachtetes Hindernis
-     * failedPath:  Position, die beim letzten Versuch nicht betreten werden konnte
-     *
-     * (Zusätzlich werden Zellen mit einer aktuell sichtbaren Entity als
-     * blockiert gezählt.)
-     */
     public List<Position> getBlockedPositions() {
         if (blockedPositionsSnapshot == null) {
             Set<Position> blockedPositions = new HashSet<>(occupiedEntityPositions);
@@ -382,9 +317,6 @@ public class InternalMap {
         return blockedPositionsSnapshot;
     }
 
-    /**
-     * Prüft, ob eine absolute Position bereits bekannt ist.
-     */
     public boolean isKnownPosition(int x, int y) {
         if (knownPositionsSnapshot == null) {
             Set<Position> knownPositions = new HashSet<>();
@@ -395,35 +327,17 @@ public class InternalMap {
         return knownPositionsSnapshot.contains(new Position(x, y));
     }
 
-    // -------------------------------------------------------------------------
-    // Failed paths
-    // -------------------------------------------------------------------------
-
-    /**
-     * Merkt sich eine Position, die nicht betreten werden konnte.
-     */
     public void rememberFailedPath(int x, int y, int step) {
         removeBlockedObservationsAt(x, y);
         ObservationKey key = new ObservationKey("failedPath", x, y, "");
         putObservation(key, new Observation("failedPath", x, y, "", step));
     }
 
-    // -------------------------------------------------------------------------
-    // Remove / update information
-    // -------------------------------------------------------------------------
-
-    /**
-     * Entfernt alle bisherigen Hindernis-Informationen über eine Position
-     * und markiert die Position anschließend als frei.
-     *
-     * Wird beispielsweise nach erfolgreichem Clear verwendet.
-     */
     public void forgetObservationsAt(int x, int y) {
         removeBlockedObservationsAt(x, y);
         rememberFreeCell(x - agentX, y - agentY, 0);
     }
 
-    /** Entfernt Hindernis-/failedPath-Beobachtungen an einer absoluten Position. */
     private void removeBlockedObservationsAt(int x, int y) {
         Position position = new Position(x, y);
         Set<ObservationKey> keys = keysByPosition.get(position);
@@ -450,12 +364,6 @@ public class InternalMap {
         }
     }
 
-    /**
-     * Entfernt bestehende Beobachtungen an einer Position, die durch eine
-     * neue Beobachtung vom Typ {@code newType} ersetzt werden. Zonen
-     * (goalZone/roleZone) werden dabei nie entfernt, da sie unabhängig von
-     * anderen Beobachtungen an derselben Position weiter gelten.
-     */
     private void removeObservationsForUpdate(int x, int y, String newType) {
         Position position = new Position(x, y);
         Set<ObservationKey> keys = keysByPosition.get(position);
@@ -511,12 +419,6 @@ public class InternalMap {
                 || type.equals("block");
     }
 
-    /**
-     * Verschiebt die gesamte interne Karte um einen Offset.
-     *
-     * Alle bekannten Koordinaten und auch die eigene Agentenposition
-     * werden entsprechend verschoben.
-     */
     public void translate(int offsetX, int offsetY) {
         agentX += offsetX;
         agentY += offsetY;
