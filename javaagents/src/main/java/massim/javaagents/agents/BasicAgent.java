@@ -118,7 +118,6 @@ public class BasicAgent extends Agent {
     private final Set<String> pendingGroupInvitations = new HashSet<>();
     private final Set<String> rejectedGroupInviteTargets = new HashSet<>();
     private String currentGroupInviteTarget = null;
-    private boolean waitingForNextTask = false;
     private boolean groupGoalZoneConfirmed = false;
     private boolean groupGoalRelocationPending;
     private int currentTaskBlockCount = 1;
@@ -919,19 +918,16 @@ public class BasicAgent extends Agent {
         boolean previousSubmitSucceeded = "submit".equals(previousAction) && "success".equals(previousActionResult);
 
         boolean currentTaskAvailable = currentTasks.stream().anyMatch(task -> task.name().equals(currentTask));
-        boolean selectNewTask = currentTask == null || !currentTaskAvailable || !isTaskActive() || waitingForNextTask;
+        boolean selectNewTask = currentTask == null || !currentTaskAvailable || !isTaskActive();
         if (selectNewTask) {
             TaskInfo selectedTask = currentTasks.stream()
                     .filter(task -> task.activeAt(currentStep))
-                    .filter(task -> !waitingForNextTask
-                        || !task.name().equals(currentTask))
                     .max((first, second) -> Long.compare(
                             first.remainingAt(currentStep), second.remainingAt(currentStep)))
                     .orElse(null);
             if (selectedTask != null) {
                 applyTaskInfo(selectedTask);
-                waitingForNextTask = false;
-            } else if (waitingForNextTask || !currentTaskAvailable || !isTaskActive()) {
+            } else if (!currentTaskAvailable || !isTaskActive()) {
                 currentTask = null;
                 currentTaskInfo = null;
                 requiredDispenserTypes.clear();
@@ -960,7 +956,6 @@ public class BasicAgent extends Agent {
             deliveryBlockType = null;
             goalPosition = null;
         } else if (!Objects.equals(currentTask, previousTask)) {
-            waitingForNextTask = false;
             resetGroupStateForNewTask();
             deliveryBlockType = null;
             goalPosition = null;
@@ -1632,6 +1627,21 @@ public class BasicAgent extends Agent {
     private void updateGroupState() {
         resetGroupStateAfterTaskChange();
 
+        if (desiredGroupSize > 1
+                && goalPosition == null
+                && currentTask != null
+                && !currentTask.isEmpty()
+                && isTaskActive()
+                && isCurrentGroupLeader()
+                && !groupFormationActive
+                && currentGroupMembers.size() >= desiredGroupSize) {
+            InternalMap.Observation goalZone = findNearestGoalZone();
+            if (goalZone != null) {
+                assignBlocksToCurrentGroupAt(
+                        new InternalMap.Position(goalZone.x(), goalZone.y()));
+            }
+        }
+
         if (desiredGroupSize <= 1
                 && deliveryBlockType == null
                 && goalPosition == null
@@ -1651,7 +1661,6 @@ public class BasicAgent extends Agent {
         if (leaderName.equals(getName())
                 && !groupFormationActive
                 && explorationFinished
-                && !waitingForNextTask
                 && !Boolean.TRUE.equals(knownAgentGroupState.get(getName()))
                 && hasFormableGroupTask()) {
             startGroupFormation();
@@ -1839,7 +1848,6 @@ public class BasicAgent extends Agent {
                 }
             } else if ("submit".equals(lastAction)) {
                 finishAssemblyAfterSuccessfulSubmit();
-                waitingForNextTask = true;
             }
         } else {
             if ("clear".equals(lastAction)

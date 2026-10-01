@@ -375,6 +375,17 @@ public class InternalMap {
      */
     public void mergeObservations(List<Observation> observationsToMerge) {
         for (Observation observation : observationsToMerge) {
+            Position position = new Position(observation.x(), observation.y());
+            Set<ObservationKey> existingKeys = keysByPosition.get(position);
+            boolean olderThanConflictingObservation = existingKeys != null
+                    && existingKeys.stream()
+                            .filter(key -> !mustKeepTogether(key.type(), observation.type()))
+                            .map(observations::get)
+                            .anyMatch(existing -> existing.lastSeenStep() >= observation.lastSeenStep());
+            if (olderThanConflictingObservation) {
+                continue;
+            }
+
             removeObservationsForUpdate(observation.x(), observation.y(), observation.type());
 
             String details = observation.details() == null ? "" : observation.details();
